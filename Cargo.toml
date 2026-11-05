@@ -1,0 +1,27 @@
+[package]
+name = "cosmic-todo-widget"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+description = "Daily to-do list desktop widget for the COSMIC desktop (libcosmic + wlr-layer-shell)"
+license = "GPL-3.0-only"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["time"] }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "7cd76ae3160cbd26ae89a4c01e64eda21f648c7f"
+default-features = false
+features = ["wayland", "winit", "tokio"]
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
+codegen-units = 1
