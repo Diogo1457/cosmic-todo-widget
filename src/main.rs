@@ -1,20 +1,25 @@
 //! COSMIC Todo Widget – a daily to-do list that lives on a monitor as part of the
 //! desktop (wlr-layer-shell), written with libcosmic.
 //!
-//! The widget behaves like a sticky note: drag the header to move it, drag the ◢
-//! handle (bottom-right) to resize it. Settings open in their own normal window.
+//! Two ways to show the list (setting "Display"):
+//!   * Widget – a sticky note on the desktop: drag the header to move it, drag the ◢
+//!     handle (bottom-right) to resize it.
+//!   * Panel  – an applet in the COSMIC panel; the list opens as a fixed-size popup.
+//! Settings open in their own normal window.
 //!
 //! Options:
-//!   --settings   open the settings window on start
-//!   --windowed   normal window instead of a desktop widget (no layer-shell)
+//!   --settings     open the settings window on start
+//!   --applet       run as the COSMIC panel applet (started by cosmic-panel)
+//!   --background   start quietly at login (does nothing when the display is "Panel")
 
 mod config;
 
+use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
-use config::{MIN_WIDTH, SavedSize, Settings, Store, autostart};
+use config::{DisplayMode, MIN_WIDTH, SavedSize, Settings, Store, autostart};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::{self, PlatformSpecific, wayland};
@@ -24,6 +29,7 @@ use cosmic::iced::platform_specific::runtime::wayland::layer_surface::{
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface, set_margin, set_size,
 };
+use cosmic::iced::platform_specific::shell::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::{
     self, Alignment, Background, Border, Color, Event, Length, Limits, Point, Size, Subscription, mouse,
     window,
@@ -46,6 +52,10 @@ const SAFETY: f32 = 8.0;
 const MAX_WIDTH: f32 = 900.0;
 /// Minimum time between two move requests sent to the compositor.
 const MOVE_INTERVAL: Duration = Duration::from_millis(30);
+/// Fixed width of the panel popup.
+const POPUP_W: f32 = 400.0;
+/// Fixed list height of the panel popup: room for 5 tasks without scrolling.
+const POPUP_LIST_H: f32 = ROW_H * 5.0 + 6.0;
 
 static AUTOSIZE_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("todo-autosize"));
 static ENTRY_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("todo-entry"));
@@ -53,7 +63,8 @@ static ENTRY_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("to
 #[derive(Clone, Debug, Default)]
 struct Args {
     settings: bool,
-    windowed: bool,
+    applet: bool,
+    background: bool,
 }
 
 fn main() -> cosmic::iced::Result {
@@ -61,10 +72,11 @@ fn main() -> cosmic::iced::Result {
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--settings" => args.settings = true,
-            "--windowed" => args.windowed = true,
+            "--applet" => args.applet = true,
+            "--background" => args.background = true,
             "-h" | "--help" => {
                 println!(
-                    "cosmic-todo-widget\n  --settings   open the settings window on start\n  --windowed   normal window instead of a desktop widget"
+                    "cosmic-todo-widget\n  --settings     open the settings window on start\n  --applet       run as the COSMIC panel applet\n  --background   start quietly (nothing happens when the display is \"Panel\")"
                 );
                 return Ok(());
             }
@@ -72,12 +84,15 @@ fn main() -> cosmic::iced::Result {
         }
     }
 
-    let mut settings = cosmic::app::Settings::default().transparent(true);
-    if args.windowed {
-        settings = settings.size(iced::Size::new(420.0, 640.0));
-    } else {
-        settings = settings.no_main_window(true);
+    if args.applet {
+        return cosmic::applet::run::<App>(args);
     }
+
+    // Started at login while the list lives in the panel: nothing to do.
+    if args.background && Settings::load().display == DisplayMode::Panel {
+        return Ok(());
+    }
+    let settings = cosmic::app::Settings::default().transparent(true).no_main_window(true);
     cosmic::app::run::<App>(settings, args)
 }
 
@@ -150,6 +165,8 @@ enum Message {
     Add,
     Toggle(String, bool),
     Delete(String),
+    MoveUp(String),
+    MoveDown(String),
     ClearDone,
 
     // settings window
@@ -157,6 +174,7 @@ enum Message {
     CloseSettings,
 
     // settings
+    SetDisplay(DisplayMode),
     SetTime24(bool),
     SetSeconds(bool),
     SetMonitor(String),
@@ -173,6 +191,10 @@ enum Message {
     GripRelease,
     GripAuto,
     Pointer(Point),
+
+    // panel applet
+    AppletPressed,
+    PopupClosed(window::Id),
 
     // close the widget
     Quit,
@@ -192,6 +214,12 @@ struct App {
     surface_output: Option<WlOutput>,
     surface_failures: u32,
     settings_id: Option<window::Id>,
+    /// Panel applet popup.
+    popup: Option<window::Id>,
+    /// Held while the desktop widget exists (only one at a time).
+    lock: Option<std::fs::File>,
+    settings_child: Option<Child>,
+    widget_child: Option<Child>,
 
     // geometry derived from the target monitor
     mon_w: f32,
@@ -207,7 +235,62 @@ struct App {
     drag: Option<Drag>,
 }
 
+/// Start another copy of this program unless the previous one is still running.
+fn spawn_child(args: &[&str], slot: &mut Option<Child>) {
+    if let Some(child) = slot.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    match Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => *slot = Some(child),
+        Err(err) => eprintln!("Could not start {}: {err}", env!("CARGO_PKG_NAME")),
+    }
+}
+
 impl App {
+    /// True when this process shows the desktop widget.
+    fn widget_mode(&self) -> bool {
+        !self.args.applet && self.settings.display == DisplayMode::Widget
+    }
+
+    fn ensure_lock(&mut self) -> bool {
+        if self.lock.is_none() {
+            self.lock = config::acquire_widget_lock();
+            if self.lock.is_none() {
+                eprintln!("Another Todo Widget is already running.");
+            }
+        }
+        self.lock.is_some()
+    }
+
+    fn close_popup(&mut self) -> Task<Message> {
+        match self.popup.take() {
+            Some(id) => destroy_popup::<cosmic::Action<Message>>(id),
+            None => Task::none(),
+        }
+    }
+
+    /// Applet only: pick up settings changed in the settings window (a separate process).
+    fn sync_applet(&mut self) -> Task<Message> {
+        let latest = Settings::load();
+        if latest == self.settings {
+            return Task::none();
+        }
+        self.settings = latest;
+        if self.settings.display != DisplayMode::Panel {
+            return self.close_popup();
+        }
+        Task::none()
+    }
+
     // ---------- geometry ----------
     fn default_w(&self) -> f32 {
         (self.mon_w * 0.20).clamp(MIN_WIDTH + 20.0, 520.0)
@@ -386,6 +469,9 @@ impl App {
 
     // ---------- layer surface ----------
     fn create_surface(&mut self, first: bool) -> Task<Message> {
+        if !self.ensure_lock() {
+            return Task::none();
+        }
         let monitor = self.resolve_monitor();
         self.recompute_geometry(monitor.as_ref(), first);
         self.surface_output = monitor.as_ref().map(|m| m.wl.clone());
@@ -494,7 +580,7 @@ impl App {
     fn apply_setting_change(&mut self, rebuild: bool) -> Task<Message> {
         self.settings.save();
         self.confirm_restore = false;
-        if rebuild && !self.args.windowed {
+        if rebuild && self.widget_mode() {
             return self.rebuild_surface();
         }
         Task::none()
@@ -554,33 +640,19 @@ impl App {
         row.into()
     }
 
-    fn tasks_view(&self) -> Element<'_, Message> {
+    // ---- pieces shared by the widget card and the panel popup ----
+    fn title_block(&self) -> Element<'_, Message> {
+        widget::Column::new()
+            .spacing(6)
+            .push(widget::text::title2("Today"))
+            .push(widget::text::caption(self.now.format("%A, %d %B %Y").to_string()))
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn progress_block(&self) -> Element<'_, Message> {
         let total = self.store.tasks.len();
         let done = self.store.tasks.iter().filter(|t| t.done).count();
-
-        let header = widget::Row::new()
-            .align_y(Alignment::Start)
-            .spacing(12)
-            .push(
-                widget::Column::new()
-                    .spacing(6)
-                    .push(widget::text::title2("Today"))
-                    .push(widget::text::caption(self.now.format("%A, %d %B %Y").to_string()))
-                    .width(Length::Fill),
-            )
-            .push(self.clock_view())
-            .push(widget::button::text("✕").on_press(Message::Quit));
-        // The header is the "sticky note" drag handle.
-        let header: Element<'_, Message> = if self.args.windowed {
-            header.into()
-        } else {
-            widget::mouse_area(header)
-                .on_press(Message::MovePress)
-                .on_release(Message::GripRelease)
-                .interaction(mouse::Interaction::Grab)
-                .into()
-        };
-
         let progress = widget::progress_bar::determinate_linear(if total > 0 {
             done as f32 / total as f32
         } else {
@@ -592,9 +664,11 @@ impl App {
         } else {
             "No tasks yet".to_string()
         });
-        let progress_block = widget::Column::new().spacing(6).push(progress).push(counter);
+        widget::Column::new().spacing(6).push(progress).push(counter).into()
+    }
 
-        let entry = widget::Row::new()
+    fn entry_row(&self) -> Element<'_, Message> {
+        widget::Row::new()
             .spacing(10)
             .align_y(Alignment::Center)
             .push(
@@ -604,8 +678,12 @@ impl App {
                     .on_submit(|_| Message::Add)
                     .width(Length::Fill),
             )
-            .push(widget::button::suggested("Add").on_press(Message::Add));
+            .push(widget::button::suggested("Add").on_press(Message::Add))
+            .into()
+    }
 
+    /// The scrollable task list with a fixed height.
+    fn task_list(&self, height: f32) -> Element<'_, Message> {
         // Pending tasks first, completed at the bottom (order otherwise kept).
         let mut ordered: Vec<&config::Task> = self.store.tasks.iter().collect();
         ordered.sort_by_key(|t| t.done);
@@ -621,8 +699,12 @@ impl App {
                     .align_y(Alignment::Center),
             );
         }
-        for t in ordered {
+        for (i, t) in ordered.iter().enumerate() {
+            let can_up = i > 0 && ordered[i - 1].done == t.done;
+            let can_down = i + 1 < ordered.len() && ordered[i + 1].done == t.done;
             let id = t.id.clone();
+            let up_id = t.id.clone();
+            let down_id = t.id.clone();
             let del_id = t.id.clone();
             let label = if t.done {
                 widget::text::body(t.text.clone()).class(cosmic::theme::Text::Custom(|theme| {
@@ -635,40 +717,89 @@ impl App {
             };
             list = list.push(
                 widget::Row::new()
-                    .spacing(12)
+                    .spacing(6)
                     .align_y(Alignment::Center)
                     .padding([7, 6])
                     .push(widget::checkbox(t.done).on_toggle(move |v| Message::Toggle(id.clone(), v)))
                     .push(label.width(Length::Fill))
+                    .push(
+                        widget::button::text("▲")
+                            .on_press_maybe(can_up.then(|| Message::MoveUp(up_id))),
+                    )
+                    .push(
+                        widget::button::text("▼")
+                            .on_press_maybe(can_down.then(|| Message::MoveDown(down_id))),
+                    )
                     .push(widget::button::text("✕").on_press(Message::Delete(del_id))),
             );
         }
-        let scroller = widget::scrollable(list).height(Length::Fixed(self.list_h()));
+        widget::scrollable(list).height(Length::Fixed(height)).into()
+    }
 
-        let tools = widget::Row::new()
+    fn tools_row(&self) -> Element<'_, Message> {
+        let done = self.store.tasks.iter().filter(|t| t.done).count();
+        widget::Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
             .push(
                 widget::button::text("Clear completed")
                     .on_press_maybe((done > 0).then_some(Message::ClearDone)),
             )
-            .push(widget::button::text("Settings").on_press(Message::OpenSettings));
+            .push(widget::button::text("Settings").on_press(Message::OpenSettings))
+            .into()
+    }
 
-        let mut footer = widget::Row::new()
+    // ---- desktop widget ----
+    fn tasks_view(&self) -> Element<'_, Message> {
+        let header = widget::Row::new()
+            .align_y(Alignment::Start)
+            .spacing(12)
+            .push(self.title_block())
+            .push(self.clock_view())
+            .push(widget::button::text("✕").on_press(Message::Quit));
+        // The header is the "sticky note" drag handle.
+        let header: Element<'_, Message> = widget::mouse_area(header)
+            .on_press(Message::MovePress)
+            .on_release(Message::GripRelease)
+            .interaction(mouse::Interaction::Grab)
+            .into();
+
+        let footer = widget::Row::new()
             .align_y(Alignment::Center)
-            .push(tools)
-            .push(widget::space().width(Length::Fill));
-        if !self.args.windowed {
-            footer = footer.push(self.grip());
-        }
+            .push(self.tools_row())
+            .push(widget::space().width(Length::Fill))
+            .push(self.grip());
 
         widget::Column::new()
             .spacing(14)
             .push(header)
-            .push(progress_block)
-            .push(entry)
-            .push(scroller)
+            .push(self.progress_block())
+            .push(self.entry_row())
+            .push(self.task_list(self.list_h()))
             .push(footer)
+            .into()
+    }
+
+    // ---- panel popup (fixed size, room for 5 tasks) ----
+    fn popup_view(&self) -> Element<'_, Message> {
+        let header = widget::Row::new()
+            .align_y(Alignment::Start)
+            .spacing(12)
+            .push(self.title_block())
+            .push(self.clock_view());
+        let content = widget::Column::new()
+            .spacing(14)
+            .width(Length::Fill)
+            .push(header)
+            .push(self.progress_block())
+            .push(self.entry_row())
+            .push(self.task_list(POPUP_LIST_H))
+            .push(self.tools_row());
+        self.core
+            .applet
+            .popup_container(
+                widget::container(content).padding(16).width(Length::Fixed(POPUP_W)),
+            )
             .into()
     }
 
@@ -692,46 +823,73 @@ impl App {
         };
         let section = |t: &'static str| widget::container(widget::text::heading(t)).padding([10, 0, 0, 0]);
 
-        let mut monitors = widget::Column::new().spacing(8).width(Length::Fill);
-        monitors = monitors.push(choice(
-            "Auto (second monitor if present)",
-            s.monitor == "auto",
-            Message::SetMonitor("auto".into()),
-        ));
-        for c in self.monitor_choices() {
-            monitors = monitors.push(choice(&c.label, s.monitor == c.id, Message::SetMonitor(c.id.clone())));
-        }
+        let widget_mode = s.display == DisplayMode::Widget;
 
-        let body = widget::Column::new()
+        let mut body = widget::Column::new()
             .spacing(16)
             .width(Length::Fill)
             .padding([0, 16, 0, 0])
+            .push(section("Display"))
+            .push(
+                widget::Row::new()
+                    .spacing(8)
+                    .push(choice(
+                        "Show as Widget",
+                        widget_mode,
+                        Message::SetDisplay(DisplayMode::Widget),
+                    ))
+                    .push(choice(
+                        "Show on Panel",
+                        !widget_mode,
+                        Message::SetDisplay(DisplayMode::Panel),
+                    )),
+            );
+        body = body.push(widget::text::caption(if widget_mode {
+            "A sticky note on the desktop: drag its header to move it, resize it with the ◢ handle in the bottom-right corner (double-click it for automatic height)."
+        } else {
+            "A popup of the COSMIC panel with room for 5 tasks. Add the \"Todo Widget\" applet to your panel in COSMIC Settings → Desktop → Panel (or Dock) → Configure panel applets."
+        }));
+
+        body = body
             .push(section("Clock"))
             .push(row("24-hour clock", None, toggle(s.time_24h, Message::SetTime24)))
-            .push(row("Show seconds", None, toggle(s.show_seconds, Message::SetSeconds)))
-            .push(section("Placement"))
-            .push(widget::text::caption(
-                "Move the widget by dragging its header. Resize it with the ◢ handle in the bottom-right corner (double-click it for automatic height).",
-            ))
-            .push(widget::text::body("Monitor"))
-            .push(monitors)
-            .push(row(
-                "Keep above windows",
-                Some("Off: part of the desktop, hidden when windows cover it"),
-                toggle(s.above_windows, Message::SetAbove),
-            ))
-            .push(section("Look"))
-            .push(row(
-                "Opacity (%)",
-                None,
-                widget::slider(30..=100, s.opacity as i32, |v| Message::SetOpacity(v as f32))
-                    .width(Length::Fixed(160.0))
-                    .into(),
-            ))
+            .push(row("Show seconds", None, toggle(s.show_seconds, Message::SetSeconds)));
+
+        if widget_mode {
+            let mut monitors = widget::Column::new().spacing(8).width(Length::Fill);
+            monitors = monitors.push(choice(
+                "Auto (second monitor if present)",
+                s.monitor == "auto",
+                Message::SetMonitor("auto".into()),
+            ));
+            for c in self.monitor_choices() {
+                monitors =
+                    monitors.push(choice(&c.label, s.monitor == c.id, Message::SetMonitor(c.id.clone())));
+            }
+            body = body
+                .push(section("Placement"))
+                .push(widget::text::body("Monitor"))
+                .push(monitors)
+                .push(row(
+                    "Keep above windows",
+                    Some("Off: part of the desktop, hidden when windows cover it"),
+                    toggle(s.above_windows, Message::SetAbove),
+                ))
+                .push(section("Look"))
+                .push(row(
+                    "Opacity (%)",
+                    None,
+                    widget::slider(30..=100, s.opacity as i32, |v| Message::SetOpacity(v as f32))
+                        .width(Length::Fixed(160.0))
+                        .into(),
+                ));
+        }
+
+        body = body
             .push(section("Startup"))
             .push(row(
                 "Start at login",
-                Some("Off by default"),
+                Some("Off by default (the panel applet starts with the panel)"),
                 toggle(s.autostart, Message::SetAutostart),
             ))
             .push(section("Reset"))
@@ -766,13 +924,13 @@ impl App {
                         .push(widget::button::destructive("Restore defaults").on_press(Message::RestoreDefaults))
                         .push(widget::button::standard("Cancel").on_press(Message::CancelRestore)),
                 )
-                .push(widget::text::caption("Really reset settings, position and size? Tasks are kept."))
+                .push(widget::text::caption("Really reset settings, position and size? Tasks and the display choice are kept."))
                 .into()
         } else {
             widget::Column::new()
                 .spacing(8)
                 .push(widget::button::destructive("Restore defaults…").on_press(Message::AskRestore))
-                .push(widget::text::caption("Resets settings, position and size. Tasks are not touched."))
+                .push(widget::text::caption("Resets settings, position and size. Tasks and the display choice are not touched."))
                 .into()
         }
     }
@@ -825,6 +983,10 @@ impl Application for App {
             surface_output: None,
             surface_failures: 0,
             settings_id: None,
+            popup: None,
+            lock: None,
+            settings_child: None,
+            widget_child: None,
             mon_w: 1920.0,
             mon_h: 1080.0,
             pos: Point::new(48.0, 48.0),
@@ -837,18 +999,23 @@ impl Application for App {
         app.recompute_geometry(None, true);
 
         let mut tasks = Vec::new();
-        if !app.args.windowed {
+        if app.widget_mode() {
             // If the compositor reports no outputs, fall back to the active one.
             tasks.push(app.settle_after(0, 1500));
         }
-        if app.args.settings {
+        // Started by hand while the list lives in the panel: show the settings window so the
+        // display can be changed back (otherwise the process would have nothing to show).
+        let panel_standalone = !app.args.applet && app.settings.display == DisplayMode::Panel;
+        if !app.args.applet && (app.args.settings || panel_standalone) {
             tasks.push(app.open_settings());
         }
         (app, Task::batch(tasks))
     }
 
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
-        if Some(id) == self.surface_id {
+        if self.popup == Some(id) {
+            Some(Message::PopupClosed(id))
+        } else if Some(id) == self.surface_id {
             Some(Message::SurfaceLost)
         } else if Some(id) == self.settings_id {
             Some(Message::CloseSettings)
@@ -858,6 +1025,9 @@ impl Application for App {
     }
 
     fn style(&self) -> Option<iced::theme::Style> {
+        if self.args.applet {
+            return Some(cosmic::applet::style());
+        }
         let theme = cosmic::theme::active();
         let on: Color = theme.cosmic().on_bg_color().into();
         Some(iced::theme::Style {
@@ -868,10 +1038,14 @@ impl Application for App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let every = if self.settings.show_seconds { 1 } else { 10 };
+        let every = match (self.args.applet, self.settings.show_seconds) {
+            (_, true) => 1,
+            (true, false) => 2, // the applet also watches for settings changes
+            (false, false) => 10,
+        };
         let mut subs = vec![iced::time::every(Duration::from_secs(every)).map(|_| Message::Tick)];
 
-        if !self.args.windowed {
+        if !self.args.applet {
             subs.push(event::listen_with(|e, _status, _id| match e {
                 Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Output(ev, wl))) => {
                     Some(Message::Output(ev, wl))
@@ -894,6 +1068,14 @@ impl Application for App {
             Message::Noop => {}
             Message::Tick => {
                 self.now = Local::now();
+                if self.args.applet {
+                    // The applet's task list is only fresh while its popup is open
+                    // (it is reloaded on open), so only then may it write tasks.
+                    if self.popup.is_some() {
+                        self.store.rollover_if_needed();
+                    }
+                    return self.sync_applet();
+                }
                 self.store.rollover_if_needed();
             }
 
@@ -916,7 +1098,7 @@ impl Application for App {
                 return self.settle_after(self.generation, 600);
             }
             Message::OutputsSettled(generation) => {
-                if generation != self.generation || self.args.windowed {
+                if generation != self.generation || !self.widget_mode() {
                     return Task::none();
                 }
                 let target = self.resolve_monitor();
@@ -926,6 +1108,13 @@ impl Application for App {
                         .as_ref()
                         .is_some_and(|m| m.width as f32 != self.mon_w || m.height as f32 != self.mon_h);
                 if moved {
+                    if self.surface_id.is_none() && !self.ensure_lock() {
+                        // Another widget is already on the desktop.
+                        if self.settings_id.is_none() {
+                            std::process::exit(0);
+                        }
+                        return Task::none();
+                    }
                     return if self.surface_id.is_none() {
                         self.create_surface(true)
                     } else {
@@ -953,21 +1142,87 @@ impl Application for App {
             }
             Message::Toggle(id, done) => self.store.toggle(&id, done),
             Message::Delete(id) => self.store.delete(&id),
+            Message::MoveUp(id) => self.store.move_task(&id, true),
+            Message::MoveDown(id) => self.store.move_task(&id, false),
             Message::ClearDone => self.store.clear_done(),
 
             // ----- settings window -----
             Message::OpenSettings => {
                 self.confirm_restore = false;
+                if self.args.applet {
+                    // The applet has no room for a normal window: use a separate process.
+                    spawn_child(&["--settings"], &mut self.settings_child);
+                    return self.close_popup();
+                }
                 return self.open_settings();
             }
             Message::CloseSettings => {
                 self.confirm_restore = false;
+                if self.settings.display == DisplayMode::Panel {
+                    // Nothing else is shown by this process while the list lives in the panel.
+                    std::process::exit(0);
+                }
                 if let Some(id) = self.settings_id.take() {
                     return window::close(id);
                 }
             }
 
+            // ----- panel applet -----
+            Message::AppletPressed => {
+                if self.settings.display == DisplayMode::Widget {
+                    // The list is shown as a desktop widget: the panel icon just starts it.
+                    spawn_child(&[], &mut self.widget_child);
+                    return Task::none();
+                }
+                if self.popup.is_some() {
+                    return self.close_popup();
+                }
+                // Always start from what is on disk (the widget may have changed it).
+                self.settings = Settings::load();
+                self.store = Store::load();
+                let Some(main_id) = self.core.main_window_id() else {
+                    return Task::none();
+                };
+                let new_id = window::Id::unique();
+                self.popup = Some(new_id);
+                let mut popup = self.core.applet.get_popup_settings(main_id, new_id, None, None, None);
+                popup.positioner.size_limits = Limits::NONE
+                    .min_width(POPUP_W)
+                    .max_width(POPUP_W)
+                    .min_height(120.0)
+                    .max_height(1000.0);
+                return get_popup::<cosmic::Action<Message>>(popup);
+            }
+            Message::PopupClosed(id) => {
+                if self.popup == Some(id) {
+                    self.popup = None;
+                }
+            }
+
             // ----- settings -----
+            Message::SetDisplay(mode) => {
+                if self.settings.display == mode {
+                    return Task::none();
+                }
+                self.settings.display = mode;
+                self.settings.save();
+                self.confirm_restore = false;
+                match mode {
+                    DisplayMode::Panel => {
+                        // Remove the desktop widget; the panel applet takes over.
+                        self.drag = None;
+                        self.lock = None;
+                        if let Some(id) = self.surface_id.take() {
+                            self.surface_output = None;
+                            return destroy_layer_surface::<cosmic::Action<Message>>(id);
+                        }
+                    }
+                    DisplayMode::Widget => {
+                        self.generation += 1;
+                        return self.settle_after(self.generation, 0);
+                    }
+                }
+            }
             Message::SetTime24(v) => {
                 self.settings.time_24h = v;
                 return self.apply_setting_change(false);
@@ -996,7 +1251,9 @@ impl Application for App {
             Message::AskRestore => self.confirm_restore = true,
             Message::CancelRestore => self.confirm_restore = false,
             Message::RestoreDefaults => {
+                let display = self.settings.display;
                 self.settings = Settings::default();
+                self.settings.display = display;
                 self.settings.save();
                 autostart::set(self.settings.autostart);
                 self.confirm_restore = false;
@@ -1005,7 +1262,7 @@ impl Application for App {
                 self.cur_w = self.default_w();
                 self.pos = self.default_pos();
                 self.store.set_ui(SavedSize::default());
-                return if self.args.windowed { Task::none() } else { self.rebuild_surface() };
+                return if self.widget_mode() { self.rebuild_surface() } else { Task::none() };
             }
 
             // ----- move / resize -----
@@ -1088,13 +1345,24 @@ impl Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        // Only used with --windowed (the layer surface uses `view_window`).
-        widget::container(widget::scrollable(self.card())).padding(8).into()
+        // The widget uses `view_window`; only the applet has a main window (the panel button).
+        if self.args.applet {
+            let button = self
+                .core
+                .applet
+                .icon_button("view-list-symbolic")
+                .on_press(Message::AppletPressed);
+            return self.core.applet.autosize_window(button).into();
+        }
+        widget::space().into()
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
         if Some(id) == self.settings_id {
             return self.settings_window();
+        }
+        if self.args.applet {
+            return if self.popup == Some(id) { self.popup_view() } else { widget::space().into() };
         }
         // Always the same widget structure (a different one would break the widget tree);
         // while resizing, the content is a fixed-size transparent area so the surface

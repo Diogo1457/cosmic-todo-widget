@@ -182,6 +182,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "apply"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1006,6 +1012,20 @@ dependencies = [
  "tracing",
  "which",
  "zbus 6.2.1",
+]
+
+[[package]]
+name = "cosmic-panel-config"
+version = "1.11.0"
+source = "git+https://github.com/pop-os/cosmic-panel#ca20ce3185b3b4404f429d59d429c40b58a2ddef"
+dependencies = [
+ "anyhow",
+ "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic)",
+ "serde",
+ "smithay-client-toolkit",
+ "tracing",
+ "wayland-protocols-wlr",
+ "xdg-shell-wrapper-config",
 ]
 
 [[package]]
@@ -2979,6 +2999,7 @@ dependencies = [
  "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic?rev=7cd76ae3160cbd26ae89a4c01e64eda21f648c7f)",
  "cosmic-freedesktop-icons",
  "cosmic-launch",
+ "cosmic-panel-config",
  "cosmic-settings-daemon-zbus",
  "cosmic-theme",
  "css-color",
@@ -3002,8 +3023,10 @@ dependencies = [
  "log",
  "palette",
  "phf 0.14.0",
+ "ron 0.12.3",
  "roxmltree 0.21.2",
  "rust-embed",
+ "rustix 1.1.6",
  "serde",
  "slotmap",
  "taffy",
@@ -6537,6 +6560,15 @@ name = "xdg"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
+
+[[package]]
+name = "xdg-shell-wrapper-config"
+version = "1.11.0"
+source = "git+https://github.com/pop-os/cosmic-panel#ca20ce3185b3b4404f429d59d429c40b58a2ddef"
+dependencies = [
+ "serde",
+ "wayland-protocols-wlr",
+]
 
 [[package]]
 name = "xkbcommon"

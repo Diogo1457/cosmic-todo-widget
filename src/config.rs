@@ -6,7 +6,7 @@
 //!
 //! Old files stay readable: unknown keys are ignored.
 
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Duration};
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,25 @@ pub const MIN_WIDTH: f32 = 320.0;
 
 fn today() -> String {
     Local::now().date_naive().to_string() // YYYY-MM-DD
+}
+
+/// Takes the "one desktop widget at a time" lock (held for as long as the returned file lives).
+/// Retries for a few seconds so a restart (old instance still shutting down) works.
+pub fn acquire_widget_lock() -> Option<fs::File> {
+    let dir = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("todo-widget.lock"))
+        .ok()?;
+    for _ in 0..30 {
+        if file.try_lock().is_ok() {
+            return Some(file);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
 }
 
 fn write_atomic(path: &PathBuf, contents: &str) {
@@ -80,7 +99,7 @@ pub mod autostart {
         };
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=Todo Widget\n\
-             Comment=Daily to-do list widget\nExec={exec}\nTerminal=false\n\
+             Comment=Daily to-do list widget\nExec={exec} --background\nTerminal=false\n\
              X-GNOME-Autostart-enabled=true\n"
         );
         if let Some(dir) = path.parent() {
@@ -94,8 +113,20 @@ pub mod autostart {
 
 // --------------------------------------------------------------------------- settings
 
+/// Where the to-do list is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// A free-standing desktop widget (layer-shell).
+    Widget,
+    /// A popup of the COSMIC panel applet (the default).
+    #[default]
+    Panel,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
+    /// Show as a desktop widget or as a panel applet popup.
+    pub display: DisplayMode,
     /// 24-hour clock (`true`) or 12-hour AM/PM (`false`).
     pub time_24h: bool,
     pub show_seconds: bool,
@@ -112,6 +143,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            display: DisplayMode::Panel,
             time_24h: true,
             show_seconds: false,
             monitor: "auto".into(),
@@ -154,6 +186,13 @@ impl Settings {
                 _ => {}
             }
         }
+        if let Some(Value::String(d)) = map.get("display") {
+            match d.as_str() {
+                "panel" => s.display = DisplayMode::Panel,
+                "widget" => s.display = DisplayMode::Widget,
+                _ => {}
+            }
+        }
         boolean("show_seconds", &mut s.show_seconds);
         if let Some(Value::String(m)) = map.get("monitor") {
             s.monitor = m.clone();
@@ -167,6 +206,13 @@ impl Settings {
 
     pub fn save(&self) {
         let mut map = Map::new();
+        map.insert(
+            "display".into(),
+            json!(match self.display {
+                DisplayMode::Widget => "widget",
+                DisplayMode::Panel => "panel",
+            }),
+        );
         map.insert("time_format".into(), json!(if self.time_24h { "24" } else { "12" }));
         map.insert("show_seconds".into(), json!(self.show_seconds));
         map.insert("monitor".into(), json!(self.monitor));
@@ -297,6 +343,34 @@ impl Store {
 
     pub fn delete(&mut self, id: &str) {
         self.tasks.retain(|t| t.id != id);
+        self.save();
+    }
+
+    /// Move a task one step up or down among the tasks with the same state
+    /// (pending tasks are listed before completed ones, so they never mix).
+    pub fn move_task(&mut self, id: &str, up: bool) {
+        let Some(i) = self.tasks.iter().position(|t| t.id == id) else {
+            return;
+        };
+        let done = self.tasks[i].done;
+        let mut j = i;
+        loop {
+            if up {
+                if j == 0 {
+                    return;
+                }
+                j -= 1;
+            } else {
+                j += 1;
+                if j >= self.tasks.len() {
+                    return;
+                }
+            }
+            if self.tasks[j].done == done {
+                break;
+            }
+        }
+        self.tasks.swap(i, j);
         self.save();
     }
 

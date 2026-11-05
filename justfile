@@ -2,6 +2,8 @@
 # uninstall, nuke...  Run `just` (or `just --list`) to see the recipes.
 #
 # "Start at login" is off by default; turn it on in the widget's Settings window.
+# The list can be shown as a desktop widget or in the COSMIC panel (Settings > Display).
+# For the panel, add the "Todo Widget" applet in COSMIC Settings > Desktop > Panel.
 #
 # Options are plain just variables, set before the recipe name:
 #   just yes=1 remove          don't ask for confirmation
@@ -25,6 +27,10 @@ config_dir        := home + "/.config/todo-widget"        # settings.json
 bin               := bin_dir + "/" + app
 autostart_file    := home + "/.config/autostart/todo-widget.desktop"   # created by the Settings toggle
 launcher_file     := apps_dir + "/todo-widget.desktop"
+# panel applet: a symlink with its own name so it can be stopped separately (comm is 15 chars max)
+applet_bin        := bin_dir + "/todo-widget-applet"
+applet_comm       := "todo-widget-app"
+applet_file       := apps_dir + "/io.github.user.CosmicTodoWidget.desktop"
 old_settings_file := apps_dir + "/todo-widget-settings.desktop"   # installed by older versions
 
 # Options (override on the command line, e.g. `just yes=1 remove`)
@@ -105,9 +111,14 @@ rust:
 # start the widget
 start: (_start "0")
 
-# stop the widget
+# stop the widget (and settings window)
 stop:
     @pkill -x {{comm}} 2>/dev/null || true
+
+# stop the panel applet (cosmic-panel starts it again)
+[private]
+_stop-applet:
+    @pkill -x {{applet_comm}} 2>/dev/null || true
 
 # stop + start
 restart: stop _pause (_start "0")
@@ -125,6 +136,7 @@ status:
     yes_no() { if [ -e "$1" ]; then echo yes; else echo no; fi; }
     echo "Binary:        {{bin}} ($(yes_no "{{bin}}"))"
     echo "Launcher:      {{launcher_file}} ($(yes_no "{{launcher_file}}"))"
+    echo "Panel applet:  {{applet_file}} ($(yes_no "{{applet_file}}"))"
     echo "Autostart:     {{autostart_file}} ($(yes_no "{{autostart_file}}"))"
     echo "Tasks/UI:      {{data_dir}} ($(yes_no "{{data_dir}}"))"
     echo "Settings:      {{config_dir}} ($(yes_no "{{config_dir}}"))"
@@ -133,6 +145,11 @@ status:
         echo "Running:       yes (pid $(pgrep -x "{{comm}}" | head -n1))"
     else
         echo "Running:       no"
+    fi
+    if pgrep -x "{{applet_comm}}" >/dev/null 2>&1; then
+        echo "Panel applet:  running"
+    else
+        echo "Panel applet:  not running (add it in COSMIC Settings > Desktop > Panel)"
     fi
 
 # ----------------------------------------------------------------------------- removal
@@ -177,14 +194,14 @@ _start skip:
         exit 0
     fi
     echo "==> Starting the widget"
-    setsid nohup "{{bin}}" >/dev/null 2>&1 </dev/null &
+    setsid nohup "{{bin}}" --background >/dev/null 2>&1 </dev/null &
 
 [private]
 _check-built:
     @[ -x "{{src}}/target/release/{{app}}" ] || { echo "Error: Nothing built yet - run: just build" >&2; exit 1; }
 
 [private]
-_install-files: _check-built stop _write-launcher
+_install-files: _check-built stop _stop-applet _write-launcher
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Installing"
@@ -192,6 +209,7 @@ _install-files: _check-built stop _write-launcher
     rm -f "{{data_dir}}/todo_widget.py"
     mkdir -p "{{bin_dir}}"
     install -m 755 "{{src}}/target/release/{{app}}" "{{bin}}"
+    ln -sf "{{bin}}" "{{applet_bin}}"
 
 [private]
 _write-launcher:
@@ -199,6 +217,21 @@ _write-launcher:
     set -euo pipefail
     mkdir -p "{{apps_dir}}"
     rm -f "{{old_settings_file}}"
+    cat > "{{applet_file}}" <<EOF
+    [Desktop Entry]
+    Type=Application
+    Name=Todo Widget
+    Comment=Daily to-do list in the panel
+    Exec={{applet_bin}} --applet
+    Icon=view-list-symbolic
+    Terminal=false
+    Categories=COSMIC;
+    NoDisplay=true
+    StartupNotify=false
+    X-CosmicApplet=true
+    X-CosmicHoverPopup=Auto
+    X-OverflowPriority=10
+    EOF
     cat > "{{launcher_file}}" <<EOF
     [Desktop Entry]
     Type=Application
@@ -216,9 +249,9 @@ _write-launcher:
     EOF
 
 [private]
-_remove-app: stop
+_remove-app: stop _stop-applet
     @echo "==> Removing {{app}}"
-    @rm -f "{{bin}}" "{{autostart_file}}" "{{launcher_file}}" "{{old_settings_file}}"
+    @rm -f "{{bin}}" "{{applet_bin}}" "{{applet_file}}" "{{autostart_file}}" "{{launcher_file}}" "{{old_settings_file}}"
 
 [private]
 _delete-data:

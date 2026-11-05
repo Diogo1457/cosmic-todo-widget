@@ -4,7 +4,8 @@ A daily to-do list that lives on your desktop, like a sticky note. It is written
 
 ## Features
 
-- Add, tick off and delete tasks; pending tasks are listed first and completed ones go to the bottom.
+- Add, tick off, delete and reorder (▲ / ▼) tasks; pending tasks are listed first and completed ones go to the bottom.
+- Two display modes: a **desktop widget** or a **panel applet** (popup with a fixed size and room for 5 tasks without scrolling).
 - Progress bar showing how many tasks are done.
 - Clock and date in the header (12 or 24-hour, optional seconds).
 - Fresh every day: completed tasks from yesterday are removed when the date changes. Unfinished tasks carry over.
@@ -62,8 +63,7 @@ just no_start=1 update   # don't start the widget afterwards (install, update)
 ## Running without installing
 
 ```bash
-cargo run --release                  # as a desktop widget
-cargo run --release -- --windowed    # as a normal window (no layer-shell)
+cargo run --release                  # as a desktop widget (display mode from the settings)
 cargo run --release -- --settings    # open the settings window on start
 ```
 
@@ -71,12 +71,21 @@ cargo run --release -- --settings    # open the settings window on start
 
 Click **Settings** on the widget (or run `cosmic-todo-widget --settings`):
 
+- **Display**: *Show on Panel* (panel applet popup, the default) or *Show as Widget* (desktop widget). Everything works in both; moving and resizing only exist for the widget, and so do Monitor, Keep above windows and Opacity.
 - **Clock**: 24-hour or 12-hour, show seconds.
 - **Monitor**: Auto (the second monitor if there is one, otherwise the only one) or a specific monitor.
 - **Keep above windows**: off means it is part of the desktop and windows cover it.
 - **Opacity**: 30–100 %.
 - **Start at login**: off by default. Turning it on creates an autostart entry for the current user; turning it off removes it.
-- **Reset**: restore the default settings (start at login goes back to off), position and size. Tasks are not touched.
+- **Reset**: restore the default settings (start at login goes back to off), position and size. Tasks and the display choice are not touched.
+
+## Using the panel
+
+1. Run `just install` (it also installs the applet entry). *Show on Panel* is the default.
+2. Add the **Todo Widget** applet: COSMIC Settings → Desktop → Panel (or Dock) → Configure panel applets.
+3. Click its icon in the panel to open the list.
+
+While the display is set to *Show as Widget*, the applet's panel icon simply starts the widget. Settings opened from the applet appear in their own window.
 
 ## Where your data is stored
 
@@ -92,7 +101,7 @@ The first two are plain JSON. `uninstall` leaves them alone; `remove` and `nuke`
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | The widget: layer-shell surface, UI, settings window, move/resize |
+| `src/main.rs` | The widget and the panel applet: layer-shell surface, popup, UI, settings window, move/resize |
 | `src/config.rs` | Settings, task storage and the autostart entry |
 | `Cargo.toml` / `Cargo.lock` | Dependencies (libcosmic is pinned to a specific commit) |
 | `justfile` | Build, install and management commands (`just --list`) |

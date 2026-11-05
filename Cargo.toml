@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["time"] }
 git = "https://github.com/pop-os/libcosmic"
 rev = "7cd76ae3160cbd26ae89a4c01e64eda21f648c7f"
 default-features = false
-features = ["wayland", "winit", "tokio"]
+features = ["wayland", "winit", "tokio", "applet"]
 
 [profile.release]
 opt-level = "s"
