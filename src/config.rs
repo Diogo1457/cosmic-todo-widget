@@ -1,23 +1,23 @@
 //! Settings and task storage.
 //!
 //! * `~/.config/todo-widget/settings.json`   – the user's settings
-//! * `~/.local/share/todo-widget/tasks.json` – tasks + position/size the widget was left with
+//! * `~/.local/share/todo-widget/tasks.json` – tasks, folders + position/size the widget was left with
 //! * `~/.config/autostart/todo-widget.desktop` – exists while "Start at login" is on
 //!
-//! Old files stay readable: unknown keys are ignored.
+//! Old files stay readable: unknown keys are ignored. Tasks are never removed automatically:
+//! only the user deletes them (a task, "Clear done", or a folder together with its tasks after
+//! a confirmation).
 
 use std::{fs, path::PathBuf, time::Duration};
 
-use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// Narrowest the widget can be made (logical px).
-pub const MIN_WIDTH: f32 = 320.0;
+pub const MIN_WIDTH: f32 = 380.0;
 
-fn today() -> String {
-    Local::now().date_naive().to_string() // YYYY-MM-DD
-}
+/// Lowest opacity the user can choose for the widget (1.0 = fully opaque).
+pub const MIN_OPACITY: f32 = 0.3;
 
 /// Takes the "one desktop widget at a time" lock (held for as long as the returned file lives).
 /// Retries for a few seconds so a restart (old instance still shutting down) works.
@@ -127,15 +127,15 @@ pub enum DisplayMode {
 pub struct Settings {
     /// Show as a desktop widget or as a panel applet popup.
     pub display: DisplayMode,
-    /// 24-hour clock (`true`) or 12-hour AM/PM (`false`).
-    pub time_24h: bool,
-    pub show_seconds: bool,
+    /// Widget background opacity chosen by the user (`MIN_OPACITY..=1.0`).
+    /// `None` (the default) = follow the system's frosted-glass transparency.
+    pub opacity: Option<f32>,
+    /// Show the clock and the date in the header (off by default).
+    pub show_clock: bool,
     /// `"auto"` or a monitor id.
     pub monitor: String,
     /// `false` = part of the desktop (windows cover it).
     pub above_windows: bool,
-    /// Card opacity in percent.
-    pub opacity: u32,
     /// Start the widget at login (mirrors the autostart file; off by default).
     pub autostart: bool,
 }
@@ -144,11 +144,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             display: DisplayMode::Panel,
-            time_24h: true,
-            show_seconds: false,
+            opacity: None,
+            show_clock: false,
             monitor: "auto".into(),
             above_windows: false,
-            opacity: 88,
             autostart: false,
         }
     }
@@ -179,13 +178,6 @@ impl Settings {
             }
         };
 
-        if let Some(Value::String(t)) = map.get("time_format") {
-            match t.as_str() {
-                "12" => s.time_24h = false,
-                "24" => s.time_24h = true,
-                _ => {}
-            }
-        }
         if let Some(Value::String(d)) = map.get("display") {
             match d.as_str() {
                 "panel" => s.display = DisplayMode::Panel,
@@ -193,14 +185,14 @@ impl Settings {
                 _ => {}
             }
         }
-        boolean("show_seconds", &mut s.show_seconds);
+        boolean("show_clock", &mut s.show_clock);
+        if let Some(a) = map.get("opacity").and_then(Value::as_f64) {
+            s.opacity = Some((a as f32).clamp(MIN_OPACITY, 1.0));
+        }
         if let Some(Value::String(m)) = map.get("monitor") {
             s.monitor = m.clone();
         }
         boolean("above_windows", &mut s.above_windows);
-        if let Some(v) = map.get("opacity").and_then(Value::as_f64) {
-            s.opacity = (v.round().max(0.0) as u32).clamp(30, 100);
-        }
         s
     }
 
@@ -213,11 +205,12 @@ impl Settings {
                 DisplayMode::Panel => "panel",
             }),
         );
-        map.insert("time_format".into(), json!(if self.time_24h { "24" } else { "12" }));
-        map.insert("show_seconds".into(), json!(self.show_seconds));
+        map.insert("show_clock".into(), json!(self.show_clock));
+        if let Some(a) = self.opacity {
+            map.insert("opacity".into(), json!((a * 100.0).round() / 100.0));
+        }
         map.insert("monitor".into(), json!(self.monitor));
         map.insert("above_windows".into(), json!(self.above_windows));
-        map.insert("opacity".into(), json!(self.opacity));
         if let Ok(text) = serde_json::to_string_pretty(&Value::Object(map)) {
             write_atomic(&Self::path(), &text);
         }
@@ -232,6 +225,35 @@ pub struct Task {
     pub text: String,
     #[serde(default)]
     pub done: bool,
+    /// Id of the folder this task lives in (`None` = top level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// Something in the list that can be dragged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemRef {
+    Task(String),
+    Folder(String),
+}
+
+/// Where a dragged item is dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropTarget {
+    /// On a task: take its place (and its folder).
+    Task(String),
+    /// On a folder header: go inside it (for tasks) or take its place (for folders).
+    Folder(String),
+    /// Below everything, outside of any folder.
+    RootEnd,
 }
 
 /// Position and size the widget was left with (logical px).
@@ -246,8 +268,8 @@ pub struct SavedSize {
 pub struct Store {
     path: PathBuf,
     pub tasks: Vec<Task>,
+    pub folders: Vec<Folder>,
     pub ui: SavedSize,
-    day: String,
 }
 
 impl Store {
@@ -263,20 +285,48 @@ impl Store {
         let mut store = Store {
             path,
             tasks: Vec::new(),
+            folders: Vec::new(),
             ui: SavedSize::default(),
-            day: today(),
         };
 
-        let data = fs::read_to_string(&store.path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .unwrap_or(Value::Null);
+        let mut readable = true;
+        let data = match fs::read_to_string(&store.path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(v) => v,
+                Err(err) => {
+                    // Never silently lose tasks: keep a copy of a file we cannot parse.
+                    readable = false;
+                    let backup = store.path.with_extension("json.corrupt");
+                    eprintln!(
+                        "Could not parse {} ({err}); keeping a copy at {}",
+                        store.path.display(),
+                        backup.display()
+                    );
+                    let _ = fs::copy(&store.path, &backup);
+                    Value::Null
+                }
+            },
+            Err(_) => Value::Null,
+        };
 
+        if let Some(Value::Array(items)) = data.get("folders") {
+            store.folders = items
+                .iter()
+                .filter_map(|v| serde_json::from_value::<Folder>(v.clone()).ok())
+                .collect();
+        }
         if let Some(Value::Array(items)) = data.get("tasks") {
             store.tasks = items
                 .iter()
                 .filter_map(|v| serde_json::from_value::<Task>(v.clone()).ok())
                 .collect();
+        }
+        // A task pointing to a folder that no longer exists goes back to the top level.
+        let ids: Vec<String> = store.folders.iter().map(|f| f.id.clone()).collect();
+        for t in &mut store.tasks {
+            if t.folder.as_ref().is_some_and(|f| !ids.contains(f)) {
+                t.folder = None;
+            }
         }
         if let Some(ui) = data.get("ui") {
             let get = |k: &str| ui.get(k).and_then(Value::as_f64).map(|v| v as f32);
@@ -285,26 +335,10 @@ impl Store {
             store.ui.width = get("width");
             store.ui.list_h = get("list_h");
         }
-        // New day: completed tasks from yesterday are dropped.
-        if let Some(saved_day) = data.get("date").and_then(Value::as_str) {
-            if saved_day != store.day {
-                store.tasks.retain(|t| !t.done);
-            }
+        if readable {
+            store.save();
         }
-        store.save();
         store
-    }
-
-    /// Drops completed tasks when the date changes. Returns `true` if it did.
-    pub fn rollover_if_needed(&mut self) -> bool {
-        let now = today();
-        if self.day == now {
-            return false;
-        }
-        self.tasks.retain(|t| !t.done);
-        self.day = now;
-        self.save();
-        true
     }
 
     pub fn save(&self) {
@@ -319,18 +353,63 @@ impl Store {
                 ui.insert(key.into(), json!(v.round() as i64));
             }
         }
-        let value = json!({ "date": self.day, "tasks": self.tasks, "ui": ui });
+        let value = json!({ "tasks": self.tasks, "folders": self.folders, "ui": ui });
         if let Ok(text) = serde_json::to_string_pretty(&value) {
             write_atomic(&self.path, &text);
         }
     }
 
-    pub fn add(&mut self, text: String) {
+    fn new_id() -> String {
+        uuid::Uuid::new_v4().simple().to_string()
+    }
+
+    /// Tasks directly inside `folder` (`None` = top level), in stored order.
+    pub fn tasks_in(&self, folder: Option<&str>) -> Vec<&Task> {
+        self.tasks.iter().filter(|t| t.folder.as_deref() == folder).collect()
+    }
+
+    /// Adds a task at the end of `folder` (`None` = top level). The folder is expanded so the
+    /// new task is visible.
+    pub fn add(&mut self, text: String, folder: Option<String>) {
+        let folder = folder.filter(|id| self.folders.iter().any(|f| f.id == *id));
+        if let Some(fid) = &folder {
+            for f in self.folders.iter_mut().filter(|f| f.id == *fid) {
+                f.collapsed = false;
+            }
+        }
         self.tasks.push(Task {
-            id: uuid::Uuid::new_v4().simple().to_string(),
+            id: Self::new_id(),
             text,
             done: false,
+            folder,
         });
+        self.save();
+    }
+
+    pub fn folder_exists(&self, id: &str) -> bool {
+        self.folders.iter().any(|f| f.id == id)
+    }
+
+    pub fn folder_name(&self, id: &str) -> Option<&str> {
+        self.folders.iter().find(|f| f.id == id).map(|f| f.name.as_str())
+    }
+
+    /// Number of tasks directly inside the folder.
+    pub fn folder_task_count(&self, id: &str) -> usize {
+        self.tasks.iter().filter(|t| t.folder.as_deref() == Some(id)).count()
+    }
+
+    pub fn expand_folder(&mut self, id: &str) {
+        for f in self.folders.iter_mut().filter(|f| f.id == id) {
+            f.collapsed = false;
+        }
+        self.save();
+    }
+
+    pub fn rename(&mut self, id: &str, text: String) {
+        for t in self.tasks.iter_mut().filter(|t| t.id == id) {
+            t.text = text.clone();
+        }
         self.save();
     }
 
@@ -346,36 +425,111 @@ impl Store {
         self.save();
     }
 
-    /// Move a task one step up or down among the tasks with the same state
-    /// (pending tasks are listed before completed ones, so they never mix).
-    pub fn move_task(&mut self, id: &str, up: bool) {
-        let Some(i) = self.tasks.iter().position(|t| t.id == id) else {
-            return;
-        };
-        let done = self.tasks[i].done;
-        let mut j = i;
-        loop {
-            if up {
-                if j == 0 {
-                    return;
-                }
-                j -= 1;
-            } else {
-                j += 1;
-                if j >= self.tasks.len() {
-                    return;
-                }
-            }
-            if self.tasks[j].done == done {
-                break;
-            }
-        }
-        self.tasks.swap(i, j);
+    pub fn clear_done(&mut self) {
+        self.tasks.retain(|t| !t.done);
         self.save();
     }
 
-    pub fn clear_done(&mut self) {
-        self.tasks.retain(|t| !t.done);
+    // ---- folders ----
+
+    /// Creates a folder (expanded, at the end of the folders) and returns its id.
+    pub fn add_folder(&mut self, name: &str) -> String {
+        let id = Self::new_id();
+        self.folders.push(Folder {
+            id: id.clone(),
+            name: name.to_string(),
+            collapsed: false,
+        });
+        self.save();
+        id
+    }
+
+    pub fn rename_folder(&mut self, id: &str, name: String) {
+        for f in self.folders.iter_mut().filter(|f| f.id == id) {
+            f.name = name.clone();
+        }
+        self.save();
+    }
+
+    pub fn toggle_folder(&mut self, id: &str) {
+        for f in self.folders.iter_mut().filter(|f| f.id == id) {
+            f.collapsed = !f.collapsed;
+        }
+        self.save();
+    }
+
+    /// Deletes the folder together with the tasks inside it (the UI asks for confirmation first
+    /// when the folder is not empty).
+    pub fn delete_folder(&mut self, id: &str) {
+        self.tasks.retain(|t| t.folder.as_deref() != Some(id));
+        self.folders.retain(|f| f.id != id);
+        self.save();
+    }
+
+    // ---- drag and drop ----
+
+    /// Move a task: onto another task (takes its place and folder), onto a folder (goes
+    /// inside, at the end) or to the end of the top level.
+    pub fn move_task(&mut self, id: &str, target: &DropTarget) {
+        let Some(from) = self.tasks.iter().position(|t| t.id == id) else {
+            return;
+        };
+        match target {
+            DropTarget::Task(tid) => {
+                if tid == id {
+                    return;
+                }
+                let Some(to) = self.tasks.iter().position(|t| t.id == *tid) else {
+                    return;
+                };
+                let folder = self.tasks[to].folder.clone();
+                let mut task = self.tasks.remove(from);
+                task.folder = folder;
+                // Moving down: the target shifted up by one, and we land after it (= `to`).
+                // Moving up: we land before it (= `to`).
+                self.tasks.insert(to, task);
+            }
+            DropTarget::Folder(fid) => {
+                if !self.folders.iter().any(|f| f.id == *fid) {
+                    return;
+                }
+                let mut task = self.tasks.remove(from);
+                task.folder = Some(fid.clone());
+                self.tasks.push(task);
+                for f in self.folders.iter_mut().filter(|f| f.id == *fid) {
+                    f.collapsed = false;
+                }
+            }
+            DropTarget::RootEnd => {
+                let mut task = self.tasks.remove(from);
+                task.folder = None;
+                self.tasks.push(task);
+            }
+        }
+        self.save();
+    }
+
+    /// Reorder a folder: onto another folder (takes its place) or to the end.
+    pub fn move_folder(&mut self, id: &str, target: &DropTarget) {
+        let Some(from) = self.folders.iter().position(|f| f.id == id) else {
+            return;
+        };
+        let to = match target {
+            DropTarget::Folder(tid) => self.folders.iter().position(|f| f.id == *tid),
+            DropTarget::Task(tid) => self
+                .tasks
+                .iter()
+                .find(|t| t.id == *tid)
+                .and_then(|t| t.folder.clone())
+                .and_then(|fid| self.folders.iter().position(|f| f.id == fid)),
+            DropTarget::RootEnd => Some(self.folders.len() - 1),
+        };
+        let Some(to) = to else { return };
+        if to == from {
+            return;
+        }
+        let folder = self.folders.remove(from);
+        self.folders.insert(to, folder);
         self.save();
     }
 

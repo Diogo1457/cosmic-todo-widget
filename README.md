@@ -4,14 +4,15 @@ A daily to-do list that lives on your desktop, like a sticky note. It is written
 
 ## Features
 
-- Add, tick off, delete and reorder (▲ / ▼) tasks; pending tasks are listed first and completed ones go to the bottom.
+- Add, tick off, rename, delete and reorder tasks (drag the ≡ handle); pending tasks are listed first and completed ones go to the bottom.
+- Folders: click a folder name to select it and new tasks are added straight into it (✕ next to the entry field goes back to the top level). Drag tasks onto a folder to move them in. Deleting a folder that is not empty asks for confirmation, because its tasks are deleted with it.
+- Right-click a task, a folder or the empty space for **New task** / **New folder**.
 - Two display modes: a **desktop widget** or a **panel applet** (popup with a fixed size and room for 5 tasks without scrolling).
 - Progress bar showing how many tasks are done.
-- Clock and date in the header (12 or 24-hour, optional seconds).
-- Fresh every day: completed tasks from yesterday are removed when the date changes. Unfinished tasks carry over.
 - Move it by dragging the header, resize it with the ◢ handle in the bottom-right corner (double-click the handle for automatic height).
 - Close it with the ✕ button in the header.
 - Choose which monitor it appears on, whether it stays above windows or behind them, and its opacity.
+- Transparency follows your COSMIC frosted-glass setting by default.
 - Optionally start at login (off by default).
 - Position, size, tasks and settings are remembered between runs.
 
@@ -72,10 +73,9 @@ cargo run --release -- --settings    # open the settings window on start
 Click **Settings** on the widget (or run `cosmic-todo-widget --settings`):
 
 - **Display**: *Show on Panel* (panel applet popup, the default) or *Show as Widget* (desktop widget). Everything works in both; moving and resizing only exist for the widget, and so do Monitor, Keep above windows and Opacity.
-- **Clock**: 24-hour or 12-hour, show seconds.
 - **Monitor**: Auto (the second monitor if there is one, otherwise the only one) or a specific monitor.
 - **Keep above windows**: off means it is part of the desktop and windows cover it.
-- **Opacity**: 30–100 %.
+- **Opacity**: *Use system transparency* (default) follows the frosted-glass setting of COSMIC; turn it off to set your own value, 30–100 %. Applies to the desktop widget only. The settings window and the panel popup always use the system values (the settings window is opaque when maximized, like other COSMIC apps).
 - **Start at login**: off by default. Turning it on creates an autostart entry for the current user; turning it off removes it.
 - **Reset**: restore the default settings (start at login goes back to off), position and size. Tasks and the display choice are not touched.
 

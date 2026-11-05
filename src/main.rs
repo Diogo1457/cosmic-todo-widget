@@ -1,4 +1,4 @@
-//! COSMIC Todo Widget – a daily to-do list that lives on a monitor as part of the
+//! COSMIC Todo Widget – a to-do list that lives on a monitor as part of the
 //! desktop (wlr-layer-shell), written with libcosmic.
 //!
 //! Two ways to show the list (setting "Display"):
@@ -6,6 +6,16 @@
 //!     handle (bottom-right) to resize it.
 //!   * Panel  – an applet in the COSMIC panel; the list opens as a fixed-size popup.
 //! Settings open in their own normal window.
+//!
+//! In the list: drag the ≡ handle of a task onto another task to put it there, onto a
+//! folder to put it inside, or onto the bottom zone to take it out of its folder. Double-click
+//! a task or folder name (or press ✎) to rename it. Click a folder name to select it: new tasks
+//! typed in the entry field go straight into the selected folder (✕ next to the entry field
+//! goes back to the top level). Right-click a row or the empty space for "New task" /
+//! "New folder". Deleting a folder that is not empty asks for confirmation first.
+//!
+//! Transparency follows the COSMIC frosted-glass setting. Only the widget's opacity can be
+//! overridden in Settings; the settings window always follows the system.
 //!
 //! Options:
 //!   --settings     open the settings window on start
@@ -19,9 +29,12 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
-use config::{DisplayMode, MIN_WIDTH, SavedSize, Settings, Store, autostart};
+use config::{
+    DisplayMode, DropTarget, ItemRef, MIN_OPACITY, MIN_WIDTH, SavedSize, Settings, Store, autostart,
+};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
+use cosmic::cctk::sctk::reexports::csd_frame::WindowState;
 use cosmic::iced::event::{self, PlatformSpecific, wayland};
 use cosmic::iced::platform_specific::runtime::wayland::layer_surface::{
     IcedMargin, IcedOutput, SctkLayerSurfaceSettings,
@@ -59,6 +72,7 @@ const POPUP_LIST_H: f32 = ROW_H * 5.0 + 6.0;
 
 static AUTOSIZE_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("todo-autosize"));
 static ENTRY_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("todo-entry"));
+static EDIT_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("todo-edit"));
 
 #[derive(Clone, Debug, Default)]
 struct Args {
@@ -151,6 +165,34 @@ struct Drag {
     last: Point,
 }
 
+/// A task or folder being dragged inside the list, and what it is currently over.
+#[derive(Clone, Debug)]
+struct ItemDrag {
+    item: ItemRef,
+    over: Option<DropTarget>,
+}
+
+/// What was right-clicked (decides where "New task" puts the task).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContextTarget {
+    Task(String),
+    Folder(String),
+    /// Empty space in the list.
+    Background,
+}
+
+/// The system's frosted-glass opacity for the widget's layer surface (1.0 when the user has
+/// frosted glass turned off in COSMIC).
+fn system_alpha() -> f32 {
+    let theme = cosmic::theme::active();
+    let c = theme.cosmic();
+    if c.frosted_system_interface {
+        c.alpha_map.blurred_alpha(c.frosted)
+    } else {
+        1.0
+    }
+}
+
 // --------------------------------------------------------------------------- messages
 #[derive(Clone, Debug)]
 enum Message {
@@ -165,9 +207,37 @@ enum Message {
     Add,
     Toggle(String, bool),
     Delete(String),
-    MoveUp(String),
-    MoveDown(String),
     ClearDone,
+
+    // rename
+    EditStart(ItemRef),
+    EditInput(String),
+    EditCommit,
+    EditCancel,
+    /// A click on empty space while renaming.
+    EditClickAway,
+
+    // folders
+    AddFolder,
+    ToggleFolder(String),
+    /// Select a folder: new tasks go inside it.
+    SelectFolder(String),
+    /// Back to adding tasks at the top level.
+    ClearTarget,
+    DeleteFolder(String),
+    ConfirmDeleteFolder(String),
+    CancelDeleteFolder,
+
+    // right-click menu
+    Context(ContextTarget),
+    CtxNewTask,
+    CtxNewFolder,
+
+    // drag and drop inside the list
+    DragStart(ItemRef),
+    DragOver(DropTarget),
+    DragLeave(DropTarget),
+    ItemDrop,
 
     // settings window
     OpenSettings,
@@ -175,11 +245,13 @@ enum Message {
 
     // settings
     SetDisplay(DisplayMode),
-    SetTime24(bool),
-    SetSeconds(bool),
+    SetClock(bool),
+    /// `true` = follow the system's transparency.
+    SetOpacitySystem(bool),
+    /// Custom widget opacity in percent.
+    SetOpacity(u8),
     SetMonitor(String),
     SetAbove(bool),
-    SetOpacity(f32),
     SetAutostart(bool),
     AskRestore,
     CancelRestore,
@@ -195,6 +267,9 @@ enum Message {
     // panel applet
     AppletPressed,
     PopupClosed(window::Id),
+
+    /// A window became (or stopped being) maximized / fullscreen.
+    WindowState(window::Id, bool),
 
     // close the widget
     Quit,
@@ -231,6 +306,18 @@ struct App {
     manual_list_h: Option<f32>,
 
     entry: String,
+    /// The task or folder being renamed, with the text typed so far.
+    editing: Option<(ItemRef, String)>,
+    /// A task or folder being dragged inside the list.
+    item_drag: Option<ItemDrag>,
+    /// Folder new tasks are added to (`None` = top level).
+    selected_folder: Option<String>,
+    /// Folder waiting for the "delete it and its tasks?" confirmation.
+    confirm_folder: Option<String>,
+    /// Open right-click menu.
+    context: Option<ContextTarget>,
+    /// The settings window is maximized / fullscreen.
+    settings_maximized: bool,
     confirm_restore: bool,
     drag: Option<Drag>,
 }
@@ -255,6 +342,34 @@ fn spawn_child(args: &[&str], slot: &mut Option<Child>) {
     }
 }
 
+/// Highlight behind a list row while a dragged item is over it.
+fn row_style(active: bool) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let on: Color = theme.cosmic().on_bg_color().into();
+        if active {
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(Color { a: 0.14, ..on })),
+                border: Border {
+                    radius: 10.0.into(),
+                    width: 1.0,
+                    color: Color { a: 0.45, ..on },
+                },
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        }
+    })
+}
+
+/// The ≡ handle: press it to start dragging a task or folder.
+fn drag_handle(item: ItemRef) -> Element<'static, Message> {
+    widget::mouse_area(widget::container(widget::text("≡").size(18)).padding([4, 6]))
+        .on_press(Message::DragStart(item))
+        .interaction(mouse::Interaction::Grab)
+        .into()
+}
+
 impl App {
     /// True when this process shows the desktop widget.
     fn widget_mode(&self) -> bool {
@@ -272,6 +387,10 @@ impl App {
     }
 
     fn close_popup(&mut self) -> Task<Message> {
+        self.editing = None;
+        self.item_drag = None;
+        self.context = None;
+        self.confirm_folder = None;
         match self.popup.take() {
             Some(id) => destroy_popup::<cosmic::Action<Message>>(id),
             None => Task::none(),
@@ -289,6 +408,38 @@ impl App {
             return self.close_popup();
         }
         Task::none()
+    }
+
+    /// Apply the rename in progress (an empty name keeps the old one).
+    fn commit_edit(&mut self) {
+        if let Some((item, text)) = self.editing.take() {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                match item {
+                    ItemRef::Task(id) => self.store.rename(&id, text),
+                    ItemRef::Folder(id) => self.store.rename_folder(&id, text),
+                }
+            }
+        }
+    }
+
+    fn focus_edit() -> Task<Message> {
+        widget::text_input::focus::<cosmic::Action<Message>>(EDIT_ID.clone())
+    }
+
+    /// The selected folder, if it still exists.
+    fn target_folder(&self) -> Option<String> {
+        self.selected_folder
+            .clone()
+            .filter(|id| self.store.folder_exists(id))
+    }
+
+    /// Delete a folder with its tasks and forget it as target.
+    fn remove_folder(&mut self, id: &str) {
+        if self.selected_folder.as_deref() == Some(id) {
+            self.selected_folder = None;
+        }
+        self.store.delete_folder(id);
     }
 
     // ---------- geometry ----------
@@ -329,16 +480,21 @@ impl App {
 
     /// Estimated natural height of the list (wrapped lines are estimated).
     fn natural_list_h(&self) -> f32 {
-        let text_w = (self.cur_w - 2.0 * CARD_PADDING - 120.0).max(100.0);
+        let text_w = (self.cur_w - 2.0 * CARD_PADDING - 190.0).max(100.0);
         let chars_per_line = (text_w / 8.0).floor().max(8.0) as usize;
-        self.store
-            .tasks
-            .iter()
-            .map(|t| {
-                let lines = t.text.chars().count().div_ceil(chars_per_line).max(1);
-                ROW_H + (lines as f32 - 1.0) * LINE_H
-            })
-            .sum()
+        let mut h = ROW_H * self.store.folders.len() as f32;
+        for t in &self.store.tasks {
+            let hidden = t
+                .folder
+                .as_ref()
+                .is_some_and(|fid| self.store.folders.iter().any(|f| f.collapsed && f.id == *fid));
+            if hidden {
+                continue;
+            }
+            let lines = t.text.chars().count().div_ceil(chars_per_line).max(1);
+            h += ROW_H + (lines as f32 - 1.0) * LINE_H;
+        }
+        h
     }
 
     /// The list height the user (or the automatic mode) wants, independent of position.
@@ -574,6 +730,7 @@ impl App {
             ..Default::default()
         });
         self.settings_id = Some(id);
+        self.settings_maximized = false;
         open.map(|_| cosmic::Action::App(Message::Noop))
     }
 
@@ -587,13 +744,19 @@ impl App {
     }
 
     // ---------- styling ----------
+    /// The widget card follows the system theme, including its frosted-glass transparency.
+    /// Only the opacity can be overridden (Settings → Opacity).
     fn card_style(&self) -> cosmic::theme::Container<'static> {
-        let alpha = self.settings.opacity.clamp(30, 100) as f32 / 100.0;
+        let custom = self.settings.opacity;
         cosmic::theme::Container::custom(move |theme| {
             let c = theme.cosmic();
-            let mut bg: Color = c.bg_color().into();
-            bg.a = alpha;
-            let on: Color = c.on_bg_color().into();
+            // Layer-shell surfaces count as "system interface" for the frosted glass setting.
+            let bg_set = c.background(c.frosted_system_interface);
+            let mut bg: Color = bg_set.base.into();
+            if let Some(a) = custom {
+                bg.a = a;
+            }
+            let on: Color = bg_set.on.into();
             cosmic::iced::widget::container::Style {
                 icon_color: Some(on),
                 text_color: Some(on),
@@ -603,6 +766,24 @@ impl App {
                     width: 1.0,
                     color: Color { a: 0.12, ..on },
                 },
+                ..Default::default()
+            }
+        })
+    }
+
+    /// Background of the settings window: always the system's values (never the widget's
+    /// custom opacity). Maximized / fullscreen windows are opaque unless COSMIC is set to
+    /// keep them frosted, exactly like COSMIC's own apps, so nothing shows through.
+    fn settings_bg(&self) -> cosmic::theme::Container<'static> {
+        let maximized = self.settings_maximized;
+        cosmic::theme::Container::custom(move |theme| {
+            let c = theme.cosmic();
+            let frosted = c.frosted_windows && (!maximized || c.frosted_maximized_apps);
+            let set = c.background(frosted);
+            cosmic::iced::widget::container::Style {
+                icon_color: Some(set.on.into()),
+                text_color: Some(set.on.into()),
+                background: Some(Background::Color(set.base.into())),
                 ..Default::default()
             }
         })
@@ -621,33 +802,34 @@ impl App {
     }
 
     fn clock_view(&self) -> Element<'_, Message> {
-        let s = &self.settings;
-        let fmt = match (s.time_24h, s.show_seconds) {
-            (true, true) => "%H:%M:%S",
-            (true, false) => "%H:%M",
-            (false, true) => "%I:%M:%S",
-            (false, false) => "%I:%M",
-        };
-        let mut time = self.now.format(fmt).to_string();
-        let mut row = widget::Row::new().align_y(Alignment::End).spacing(6);
-        if !s.time_24h {
-            time = time.trim_start_matches('0').to_string();
-            row = row.push(widget::text(time).size(30));
-            row = row.push(widget::text(self.now.format("%p").to_string()).size(12));
-        } else {
-            row = row.push(widget::text(time).size(30));
+        widget::text(self.now.format("%H:%M").to_string()).size(30).into()
+    }
+
+    /// Header: title (with the date), the clock if enabled, and the close button on the widget.
+    fn header_row(&self, with_quit: bool) -> Element<'_, Message> {
+        let mut row = widget::Row::new()
+            .align_y(Alignment::Start)
+            .spacing(12)
+            .push(self.title_block());
+        if self.settings.show_clock {
+            row = row.push(self.clock_view());
+        }
+        if with_quit {
+            row = row.push(widget::button::text("✕").on_press(Message::Quit));
         }
         row.into()
     }
 
     // ---- pieces shared by the widget card and the panel popup ----
     fn title_block(&self) -> Element<'_, Message> {
-        widget::Column::new()
+        let mut col = widget::Column::new()
             .spacing(6)
             .push(widget::text::title2("Today"))
-            .push(widget::text::caption(self.now.format("%A, %d %B %Y").to_string()))
-            .width(Length::Fill)
-            .into()
+            .width(Length::Fill);
+        if self.settings.show_clock {
+            col = col.push(widget::text::caption(self.now.format("%A, %d %B %Y").to_string()));
+        }
+        col.into()
     }
 
     fn progress_block(&self) -> Element<'_, Message> {
@@ -668,44 +850,167 @@ impl App {
     }
 
     fn entry_row(&self) -> Element<'_, Message> {
-        widget::Row::new()
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .push(
-                widget::text_input("Add a task…", &self.entry)
-                    .id(ENTRY_ID.clone())
-                    .on_input(Message::Input)
-                    .on_submit(|_| Message::Add)
-                    .width(Length::Fill),
-            )
-            .push(widget::button::suggested("Add").on_press(Message::Add))
+        let target = self.target_folder();
+        let placeholder = match target.as_deref().and_then(|id| self.store.folder_name(id)) {
+            Some(name) => format!("Add a task to “{name}”…"),
+            None => "Add a task…".to_string(),
+        };
+        let mut row = widget::Row::new().spacing(10).align_y(Alignment::Center).push(
+            widget::text_input(placeholder, &self.entry)
+                .id(ENTRY_ID.clone())
+                .on_input(Message::Input)
+                .on_submit(|_| Message::Add)
+                .width(Length::Fill),
+        );
+        if target.is_some() {
+            // Leave the folder: tasks go to the top level again.
+            row = row.push(widget::button::text("✕").on_press(Message::ClearTarget));
+        }
+        row.push(widget::button::suggested("Add").on_press(Message::Add)).into()
+    }
+
+    /// Tasks of one group: pending first, completed at the bottom (order otherwise kept).
+    fn ordered(&self, folder: Option<&str>) -> Vec<&config::Task> {
+        let mut v = self.store.tasks_in(folder);
+        v.sort_by_key(|t| t.done);
+        v
+    }
+
+    /// Text field used while renaming a task or folder.
+    fn edit_field(&self, placeholder: &'static str) -> Element<'_, Message> {
+        let value = self.editing.as_ref().map(|(_, s)| s.as_str()).unwrap_or("");
+        widget::text_input(placeholder, value)
+            .id(EDIT_ID.clone())
+            .on_input(Message::EditInput)
+            .on_submit(|_| Message::EditCommit)
+            .width(Length::Fill)
             .into()
     }
 
-    /// The scrollable task list with a fixed height.
-    fn task_list(&self, height: f32) -> Element<'_, Message> {
-        // Pending tasks first, completed at the bottom (order otherwise kept).
-        let mut ordered: Vec<&config::Task> = self.store.tasks.iter().collect();
-        ordered.sort_by_key(|t| t.done);
-
-        // Right padding keeps the text clear of the scrollbar.
-        let mut list = widget::Column::new().spacing(4).width(Length::Fill).padding([0, 14, 0, 0]);
-        if ordered.is_empty() {
-            list = list.push(
-                widget::container(widget::text::body("Nothing to do - enjoy the day"))
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ROW_H))
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            );
+    /// Wraps a list row so that dragged items can be dropped on it (highlighted while hovered
+    /// or `selected`). Right-clicking a task or folder row opens the context menu.
+    fn drop_zone<'a>(
+        &self,
+        content: Element<'a, Message>,
+        target: DropTarget,
+        selected: bool,
+    ) -> Element<'a, Message> {
+        let over = self
+            .item_drag
+            .as_ref()
+            .is_some_and(|d| d.over.as_ref() == Some(&target));
+        let ctx = match &target {
+            DropTarget::Task(id) => Some(ContextTarget::Task(id.clone())),
+            DropTarget::Folder(id) => Some(ContextTarget::Folder(id.clone())),
+            DropTarget::RootEnd => None,
+        };
+        let framed = widget::container(content)
+            .width(Length::Fill)
+            .class(row_style(over || selected));
+        let mut area = widget::mouse_area(framed);
+        if let Some(c) = ctx {
+            area = area.on_right_press(Message::Context(c));
         }
-        for (i, t) in ordered.iter().enumerate() {
-            let can_up = i > 0 && ordered[i - 1].done == t.done;
-            let can_down = i + 1 < ordered.len() && ordered[i + 1].done == t.done;
-            let id = t.id.clone();
-            let up_id = t.id.clone();
-            let down_id = t.id.clone();
-            let del_id = t.id.clone();
+        if self.item_drag.is_some() {
+            area = area
+                .on_enter(Message::DragOver(target.clone()))
+                .on_exit(Message::DragLeave(target));
+        }
+        area.into()
+    }
+
+    /// The small right-click menu, shown right below the row that was clicked.
+    fn context_menu(&self) -> Element<'static, Message> {
+        let row = widget::Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(widget::button::text("+ New task").on_press(Message::CtxNewTask))
+            .push(widget::button::text("+ New folder").on_press(Message::CtxNewFolder));
+        widget::container(row)
+            .padding([4, 10])
+            .class(row_style(true))
+            .into()
+    }
+
+    fn folder_row(&self, f: &config::Folder) -> Element<'_, Message> {
+        let id = f.id.clone();
+        let editing = matches!(&self.editing, Some((ItemRef::Folder(e), _)) if *e == f.id);
+        let total = self
+            .store
+            .tasks
+            .iter()
+            .filter(|t| t.folder.as_deref() == Some(f.id.as_str()))
+            .count();
+        let done = self
+            .store
+            .tasks
+            .iter()
+            .filter(|t| t.folder.as_deref() == Some(f.id.as_str()) && t.done)
+            .count();
+
+        // Waiting for the confirmation to delete a folder together with its tasks.
+        if self.confirm_folder.as_deref() == Some(f.id.as_str()) {
+            let row = widget::Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([7, 6])
+                .push(
+                    widget::text::body(format!(
+                        "Delete “{}” and its {} task{}?",
+                        f.name,
+                        total,
+                        if total == 1 { "" } else { "s" }
+                    ))
+                    .width(Length::Fill),
+                )
+                .push(widget::button::destructive("Delete").on_press(Message::ConfirmDeleteFolder(id.clone())))
+                .push(widget::button::standard("Cancel").on_press(Message::CancelDeleteFolder));
+            return self.drop_zone(row.into(), DropTarget::Folder(f.id.clone()), false);
+        }
+
+        let selected = self.target_folder().as_deref() == Some(f.id.as_str());
+        let mut row = widget::Row::new().spacing(6).align_y(Alignment::Center).padding([7, 6]);
+        row = row.push(drag_handle(ItemRef::Folder(id.clone())));
+        row = row.push(
+            widget::button::text(if f.collapsed { "▸" } else { "▾" })
+                .on_press(Message::ToggleFolder(id.clone())),
+        );
+        if editing {
+            row = row
+                .push(self.edit_field("Folder name"))
+                .push(widget::button::text("✓").on_press(Message::EditCommit))
+                .push(widget::button::text("✕").on_press(Message::EditCancel));
+        } else {
+            // Click selects the folder (new tasks go inside it); double-click renames it.
+            let label = widget::mouse_area(widget::text::heading(f.name.clone()).width(Length::Fill))
+                .on_press(Message::SelectFolder(id.clone()))
+                .on_double_click(Message::EditStart(ItemRef::Folder(id.clone())));
+            row = row
+                .push(label)
+                .push(widget::text::caption(format!("{done}/{total}")))
+                .push(widget::button::text("✎").on_press(Message::EditStart(ItemRef::Folder(id.clone()))))
+                .push(widget::button::text("✕").on_press(Message::DeleteFolder(id.clone())));
+        }
+        self.drop_zone(row.into(), DropTarget::Folder(f.id.clone()), selected)
+    }
+
+    fn task_row(&self, t: &config::Task, indented: bool) -> Element<'_, Message> {
+        let id = t.id.clone();
+        let toggle_id = t.id.clone();
+        let editing = matches!(&self.editing, Some((ItemRef::Task(e), _)) if *e == t.id);
+
+        let mut row = widget::Row::new().spacing(6).align_y(Alignment::Center);
+        row = if indented { row.padding([7, 6, 7, 28]) } else { row.padding([7, 6, 7, 6]) };
+        row = row
+            .push(drag_handle(ItemRef::Task(id.clone())))
+            .push(widget::checkbox(t.done).on_toggle(move |v| Message::Toggle(toggle_id.clone(), v)));
+
+        if editing {
+            row = row
+                .push(self.edit_field("Task"))
+                .push(widget::button::text("✓").on_press(Message::EditCommit))
+                .push(widget::button::text("✕").on_press(Message::EditCancel));
+        } else {
             let label = if t.done {
                 widget::text::body(t.text.clone()).class(cosmic::theme::Text::Custom(|theme| {
                     let mut c: Color = theme.cosmic().on_bg_color().into();
@@ -715,25 +1020,71 @@ impl App {
             } else {
                 widget::text::body(t.text.clone())
             };
+            let label = widget::mouse_area(label.width(Length::Fill))
+                .on_double_click(Message::EditStart(ItemRef::Task(id.clone())));
+            row = row
+                .push(label)
+                .push(widget::button::text("✎").on_press(Message::EditStart(ItemRef::Task(id.clone()))))
+                .push(widget::button::text("✕").on_press(Message::Delete(id.clone())));
+        }
+        self.drop_zone(row.into(), DropTarget::Task(t.id.clone()), false)
+    }
+
+    /// The scrollable list (folders first, then top-level tasks) with a fixed height.
+    fn task_list(&self, height: f32) -> Element<'_, Message> {
+        // Right padding keeps the text clear of the scrollbar.
+        let mut list = widget::Column::new().spacing(4).width(Length::Fill).padding([0, 14, 0, 0]);
+        if self.store.tasks.is_empty() && self.store.folders.is_empty() {
             list = list.push(
-                widget::Row::new()
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .padding([7, 6])
-                    .push(widget::checkbox(t.done).on_toggle(move |v| Message::Toggle(id.clone(), v)))
-                    .push(label.width(Length::Fill))
-                    .push(
-                        widget::button::text("▲")
-                            .on_press_maybe(can_up.then(|| Message::MoveUp(up_id))),
-                    )
-                    .push(
-                        widget::button::text("▼")
-                            .on_press_maybe(can_down.then(|| Message::MoveDown(down_id))),
-                    )
-                    .push(widget::button::text("✕").on_press(Message::Delete(del_id))),
+                widget::container(widget::text::body("Nothing to do - enjoy the day"))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ROW_H))
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
             );
         }
-        widget::scrollable(list).height(Length::Fixed(height)).into()
+        for f in &self.store.folders {
+            list = list.push(self.folder_row(f));
+            if self.context == Some(ContextTarget::Folder(f.id.clone())) {
+                list = list.push(self.context_menu());
+            }
+            if !f.collapsed {
+                let inside = self.ordered(Some(f.id.as_str()));
+                if inside.is_empty() {
+                    list = list.push(
+                        widget::container(widget::text::caption("Empty - select the folder and add a task"))
+                            .padding([2, 0, 6, 40]),
+                    );
+                }
+                for t in inside {
+                    list = list.push(self.task_row(t, true));
+                    if self.context == Some(ContextTarget::Task(t.id.clone())) {
+                        list = list.push(self.context_menu());
+                    }
+                }
+            }
+        }
+        for t in self.ordered(None) {
+            list = list.push(self.task_row(t, false));
+            if self.context == Some(ContextTarget::Task(t.id.clone())) {
+                list = list.push(self.context_menu());
+            }
+        }
+        if self.context == Some(ContextTarget::Background) {
+            list = list.push(self.context_menu());
+        }
+        if self.item_drag.is_some() {
+            let zone = widget::container(widget::text::caption("Drop here: outside folders, at the end"))
+                .width(Length::Fill)
+                .height(Length::Fixed(ROW_H))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center);
+            list = list.push(self.drop_zone(zone.into(), DropTarget::RootEnd, false));
+        }
+        // Right-click on empty space (rows handle their own right-click).
+        widget::mouse_area(widget::scrollable(list).height(Length::Fixed(height)))
+            .on_right_press(Message::Context(ContextTarget::Background))
+            .into()
     }
 
     fn tools_row(&self) -> Element<'_, Message> {
@@ -742,21 +1093,17 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center)
             .push(
-                widget::button::text("Clear completed")
+                widget::button::text("Clear done")
                     .on_press_maybe((done > 0).then_some(Message::ClearDone)),
             )
+            .push(widget::button::text("New folder").on_press(Message::AddFolder))
             .push(widget::button::text("Settings").on_press(Message::OpenSettings))
             .into()
     }
 
     // ---- desktop widget ----
     fn tasks_view(&self) -> Element<'_, Message> {
-        let header = widget::Row::new()
-            .align_y(Alignment::Start)
-            .spacing(12)
-            .push(self.title_block())
-            .push(self.clock_view())
-            .push(widget::button::text("✕").on_press(Message::Quit));
+        let header = self.header_row(true);
         // The header is the "sticky note" drag handle.
         let header: Element<'_, Message> = widget::mouse_area(header)
             .on_press(Message::MovePress)
@@ -782,11 +1129,7 @@ impl App {
 
     // ---- panel popup (fixed size, room for 5 tasks) ----
     fn popup_view(&self) -> Element<'_, Message> {
-        let header = widget::Row::new()
-            .align_y(Alignment::Start)
-            .spacing(12)
-            .push(self.title_block())
-            .push(self.clock_view());
+        let header = self.header_row(false);
         let content = widget::Column::new()
             .spacing(14)
             .width(Length::Fill)
@@ -803,34 +1146,18 @@ impl App {
             .into()
     }
 
-    /// Content of the separate settings window.
+    /// Content of the separate settings window (built from the COSMIC settings widgets so it
+    /// follows the system theme).
     fn settings_window(&self) -> Element<'_, Message> {
         let s = &self.settings;
-
-        let row = |title: &'static str, hint: Option<&'static str>, control: Element<'static, Message>| {
-            let mut left = widget::Column::new().spacing(6).push(widget::text::body(title));
-            if let Some(h) = hint {
-                left = left.push(widget::text::caption(h));
-            }
-            widget::Row::new()
-                .spacing(16)
-                .align_y(Alignment::Center)
-                .push(left.width(Length::Fill))
-                .push(control)
+        let padded = |e: Element<'static, Message>| -> Element<'static, Message> {
+            widget::container(e).padding([8, 16]).width(Length::Fill).into()
         };
-        let toggle = |v: bool, msg: fn(bool) -> Message| -> Element<'static, Message> {
-            widget::toggler(v).on_toggle(msg).into()
-        };
-        let section = |t: &'static str| widget::container(widget::text::heading(t)).padding([10, 0, 0, 0]);
-
         let widget_mode = s.display == DisplayMode::Widget;
 
-        let mut body = widget::Column::new()
-            .spacing(16)
-            .width(Length::Fill)
-            .padding([0, 16, 0, 0])
-            .push(section("Display"))
-            .push(
+        let display = widget::settings::section()
+            .title("Display")
+            .add(padded(
                 widget::Row::new()
                     .spacing(8)
                     .push(choice(
@@ -842,58 +1169,71 @@ impl App {
                         "Show on Panel",
                         !widget_mode,
                         Message::SetDisplay(DisplayMode::Panel),
-                    )),
-            );
-        body = body.push(widget::text::caption(if widget_mode {
-            "A sticky note on the desktop: drag its header to move it, resize it with the ◢ handle in the bottom-right corner (double-click it for automatic height)."
-        } else {
-            "A popup of the COSMIC panel with room for 5 tasks. Add the \"Todo Widget\" applet to your panel in COSMIC Settings → Desktop → Panel (or Dock) → Configure panel applets."
-        }));
+                    ))
+                    .into(),
+            ))
+            .add(padded(
+                widget::text::caption(if widget_mode {
+                    "A sticky note on the desktop: drag its header to move it, resize it with the ◢ handle in the bottom-right corner (double-click it for automatic height)."
+                } else {
+                    "A popup of the COSMIC panel with room for 5 tasks. Add the \"Todo Widget\" applet to your panel in COSMIC Settings → Desktop → Panel (or Dock) → Configure panel applets."
+                })
+                .into(),
+            ));
 
-        body = body
-            .push(section("Clock"))
-            .push(row("24-hour clock", None, toggle(s.time_24h, Message::SetTime24)))
-            .push(row("Show seconds", None, toggle(s.show_seconds, Message::SetSeconds)));
+        let mut page = widget::Column::new()
+            .spacing(24)
+            .width(Length::Fill)
+            .padding([0, 16, 0, 0])
+            .push(display)
+            .push(widget::settings::section().title("Header").add(
+                widget::settings::item::builder("Show clock and date").toggler(s.show_clock, Message::SetClock),
+            ));
 
         if widget_mode {
-            let mut monitors = widget::Column::new().spacing(8).width(Length::Fill);
-            monitors = monitors.push(choice(
+            let mut placement = widget::settings::section().title("Monitor").add(padded(choice(
                 "Auto (second monitor if present)",
                 s.monitor == "auto",
                 Message::SetMonitor("auto".into()),
-            ));
+            )));
             for c in self.monitor_choices() {
-                monitors =
-                    monitors.push(choice(&c.label, s.monitor == c.id, Message::SetMonitor(c.id.clone())));
+                placement = placement.add(padded(choice(
+                    &c.label,
+                    s.monitor == c.id,
+                    Message::SetMonitor(c.id.clone()),
+                )));
             }
-            body = body
-                .push(section("Placement"))
-                .push(widget::text::body("Monitor"))
-                .push(monitors)
-                .push(row(
-                    "Keep above windows",
-                    Some("Off: part of the desktop, hidden when windows cover it"),
-                    toggle(s.above_windows, Message::SetAbove),
-                ))
-                .push(section("Look"))
-                .push(row(
-                    "Opacity (%)",
-                    None,
-                    widget::slider(30..=100, s.opacity as i32, |v| Message::SetOpacity(v as f32))
-                        .width(Length::Fixed(160.0))
-                        .into(),
-                ));
+            let layer = widget::settings::section().title("Placement").add(
+                widget::settings::item::builder("Keep above windows")
+                    .description("Off: part of the desktop, hidden when windows cover it")
+                    .toggler(s.above_windows, Message::SetAbove),
+            );
+            let mut opacity = widget::settings::section().title("Opacity").add(
+                widget::settings::item::builder("Use system transparency")
+                    .description("Follows the frosted glass setting of COSMIC (Settings → Desktop → Appearance)")
+                    .toggler(s.opacity.is_none(), Message::SetOpacitySystem),
+            );
+            if let Some(a) = s.opacity {
+                let lo = (MIN_OPACITY * 100.0).round() as u8;
+                let pct = ((a * 100.0).round() as u8).clamp(lo, 100);
+                opacity = opacity.add(
+                    widget::settings::item::builder(format!("Widget opacity: {pct} %")).control(
+                        widget::slider(lo..=100, pct, Message::SetOpacity).width(Length::Fixed(200.0)),
+                    ),
+                );
+            }
+            page = page.push(placement).push(layer).push(opacity);
         }
 
-        body = body
-            .push(section("Startup"))
-            .push(row(
-                "Start at login",
-                Some("Off by default (the panel applet starts with the panel)"),
-                toggle(s.autostart, Message::SetAutostart),
-            ))
-            .push(section("Reset"))
-            .push(self.restore_view());
+        let startup = widget::settings::section().title("Startup").add(
+            widget::settings::item::builder("Start at login")
+                .description("Off by default (the panel applet starts with the panel)")
+                .toggler(s.autostart, Message::SetAutostart),
+        );
+        let reset = widget::settings::section()
+            .title("Reset")
+            .add(widget::container(self.restore_view()).padding([8, 16]).width(Length::Fill));
+        page = page.push(startup).push(reset);
 
         let header = widget::Row::new()
             .align_y(Alignment::Center)
@@ -904,12 +1244,12 @@ impl App {
             widget::Column::new()
                 .spacing(16)
                 .push(header)
-                .push(widget::scrollable(body).height(Length::Fill)),
+                .push(widget::scrollable(page).height(Length::Fill)),
         )
         .padding(20)
         .width(Length::Fill)
         .height(Length::Fill)
-        .class(cosmic::theme::Container::Background)
+        .class(self.settings_bg())
         .into()
     }
 
@@ -924,13 +1264,13 @@ impl App {
                         .push(widget::button::destructive("Restore defaults").on_press(Message::RestoreDefaults))
                         .push(widget::button::standard("Cancel").on_press(Message::CancelRestore)),
                 )
-                .push(widget::text::caption("Really reset settings, position and size? Tasks and the display choice are kept."))
+                .push(widget::text::caption("Really reset settings, position and size? Tasks, folders and the display choice are kept."))
                 .into()
         } else {
             widget::Column::new()
                 .spacing(8)
                 .push(widget::button::destructive("Restore defaults…").on_press(Message::AskRestore))
-                .push(widget::text::caption("Resets settings, position and size. Tasks and the display choice are not touched."))
+                .push(widget::text::caption("Resets settings, position and size. Tasks, folders and the display choice are not touched."))
                 .into()
         }
     }
@@ -990,9 +1330,15 @@ impl Application for App {
             mon_w: 1920.0,
             mon_h: 1080.0,
             pos: Point::new(48.0, 48.0),
-            cur_w: 360.0,
+            cur_w: 400.0,
             manual_list_h: None,
             entry: String::new(),
+            editing: None,
+            item_drag: None,
+            selected_folder: None,
+            confirm_folder: None,
+            context: None,
+            settings_maximized: false,
             confirm_restore: false,
             drag: None,
         };
@@ -1038,18 +1384,25 @@ impl Application for App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let every = match (self.args.applet, self.settings.show_seconds) {
-            (_, true) => 1,
-            (true, false) => 2, // the applet also watches for settings changes
-            (false, false) => 10,
-        };
-        let mut subs = vec![iced::time::every(Duration::from_secs(every)).map(|_| Message::Tick)];
+        let mut subs: Vec<Subscription<Message>> = Vec::new();
+        if self.args.applet {
+            // The applet watches for settings changed in the settings window (another process).
+            subs.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick));
+        } else if self.settings.show_clock {
+            subs.push(iced::time::every(Duration::from_secs(10)).map(|_| Message::Tick));
+        }
 
         if !self.args.applet {
-            subs.push(event::listen_with(|e, _status, _id| match e {
+            subs.push(event::listen_with(|e, _status, id| match e {
                 Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Output(ev, wl))) => {
                     Some(Message::Output(ev, wl))
                 }
+                Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Window(
+                    wayland::WindowEvent::WindowState(state),
+                ))) => Some(Message::WindowState(
+                    id,
+                    state.intersects(WindowState::MAXIMIZED | WindowState::FULLSCREEN),
+                )),
                 _ => None,
             }));
         }
@@ -1060,23 +1413,72 @@ impl Application for App {
                 _ => None,
             }));
         }
+        if self.editing.is_some() || self.context.is_some() {
+            // A press nobody handled (empty space) confirms the rename / closes the menu.
+            subs.push(event::listen_with(|e, status, _id| match (e, status) {
+                (Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), event::Status::Ignored) => {
+                    Some(Message::EditClickAway)
+                }
+                _ => None,
+            }));
+        }
+        if self.item_drag.is_some() {
+            // Dropping happens wherever the button is released.
+            subs.push(event::listen_with(|e, _status, _id| match e {
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::ItemDrop),
+                _ => None,
+            }));
+        }
         Subscription::batch(subs)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Any action other than typing in / cancelling the rename box confirms the rename
+        // (clicking elsewhere, another button, starting a drag, ...).
+        if !matches!(
+            message,
+            Message::Noop
+                | Message::Tick
+                | Message::Output(..)
+                | Message::OutputsSettled(_)
+                | Message::SurfaceLost
+                | Message::Input(_)
+                | Message::EditInput(_)
+                | Message::EditCancel
+                | Message::Pointer(_)
+                | Message::WindowState(..)
+        ) {
+            self.commit_edit();
+        }
+        // Anything but background events closes the right-click menu and a pending folder
+        // delete confirmation (the menu's target is kept for "New task").
+        let transient = matches!(
+            message,
+            Message::Noop
+                | Message::Tick
+                | Message::Output(..)
+                | Message::OutputsSettled(_)
+                | Message::SurfaceLost
+                | Message::Pointer(_)
+                | Message::WindowState(..)
+                | Message::Context(_)
+        );
+        let menu_target = if transient { None } else { self.context.take() };
+        if !transient {
+            self.confirm_folder = None;
+        }
         match message {
             Message::Noop => {}
             Message::Tick => {
                 self.now = Local::now();
                 if self.args.applet {
-                    // The applet's task list is only fresh while its popup is open
-                    // (it is reloaded on open), so only then may it write tasks.
-                    if self.popup.is_some() {
-                        self.store.rollover_if_needed();
-                    }
                     return self.sync_applet();
                 }
-                self.store.rollover_if_needed();
+            }
+            Message::WindowState(id, maximized) => {
+                if Some(id) == self.settings_id {
+                    self.settings_maximized = maximized;
+                }
             }
 
             // ----- monitors / surface -----
@@ -1136,15 +1538,127 @@ impl Application for App {
             Message::Add => {
                 let text = self.entry.trim().to_string();
                 if !text.is_empty() {
-                    self.store.add(text);
+                    let folder = self.target_folder();
+                    self.store.add(text, folder);
                     self.entry.clear();
                 }
             }
             Message::Toggle(id, done) => self.store.toggle(&id, done),
             Message::Delete(id) => self.store.delete(&id),
-            Message::MoveUp(id) => self.store.move_task(&id, true),
-            Message::MoveDown(id) => self.store.move_task(&id, false),
             Message::ClearDone => self.store.clear_done(),
+
+            // ----- rename -----
+            Message::EditStart(item) => {
+                let text = match &item {
+                    ItemRef::Task(id) => self
+                        .store
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == *id)
+                        .map(|t| t.text.clone()),
+                    ItemRef::Folder(id) => self
+                        .store
+                        .folders
+                        .iter()
+                        .find(|f| f.id == *id)
+                        .map(|f| f.name.clone()),
+                };
+                let Some(text) = text else { return Task::none() };
+                self.editing = Some((item, text));
+                return Self::focus_edit();
+            }
+            Message::EditInput(text) => {
+                if let Some((_, buf)) = self.editing.as_mut() {
+                    *buf = text;
+                }
+            }
+            // Enter / ✓ / click elsewhere: the rename was already applied at the top of `update`.
+            Message::EditCommit | Message::EditClickAway => {}
+            Message::EditCancel => self.editing = None,
+
+            // ----- folders -----
+            Message::AddFolder | Message::CtxNewFolder => {
+                let id = self.store.add_folder("New folder");
+                self.editing = Some((ItemRef::Folder(id), "New folder".to_string()));
+                return Self::focus_edit();
+            }
+            Message::ToggleFolder(id) => self.store.toggle_folder(&id),
+            Message::SelectFolder(id) => self.selected_folder = Some(id),
+            Message::ClearTarget => self.selected_folder = None,
+            Message::DeleteFolder(id) => {
+                self.editing = None;
+                if self.store.folder_task_count(&id) > 0 {
+                    // Not empty: ask before deleting the tasks inside.
+                    self.confirm_folder = Some(id);
+                } else {
+                    self.remove_folder(&id);
+                }
+            }
+            Message::ConfirmDeleteFolder(id) => {
+                self.editing = None;
+                self.remove_folder(&id);
+            }
+            Message::CancelDeleteFolder => {}
+
+            // ----- right-click menu -----
+            Message::Context(target) => self.context = Some(target),
+            Message::CtxNewTask => {
+                // The task goes where the click was: inside the folder that was clicked (or that
+                // contains the clicked task), otherwise at the top level.
+                let folder = match menu_target {
+                    Some(ContextTarget::Folder(id)) => Some(id),
+                    Some(ContextTarget::Task(id)) => self
+                        .store
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == id)
+                        .and_then(|t| t.folder.clone()),
+                    _ => None,
+                };
+                if let Some(fid) = &folder {
+                    self.store.expand_folder(fid);
+                }
+                self.selected_folder = folder;
+                return widget::text_input::focus::<cosmic::Action<Message>>(ENTRY_ID.clone());
+            }
+
+            // ----- drag and drop inside the list -----
+            Message::DragStart(item) => {
+                self.editing = None;
+                self.item_drag = Some(ItemDrag { item, over: None });
+            }
+            Message::DragOver(target) => {
+                if let Some(d) = self.item_drag.as_mut() {
+                    let skip = match (&d.item, &target) {
+                        (ItemRef::Task(a), DropTarget::Task(b)) | (ItemRef::Folder(a), DropTarget::Folder(b)) => {
+                            a == b
+                        }
+                        // Folders are reordered on other folders (or the bottom zone) only.
+                        (ItemRef::Folder(_), DropTarget::Task(_)) => true,
+                        _ => false,
+                    };
+                    if !skip {
+                        d.over = Some(target);
+                    }
+                }
+            }
+            Message::DragLeave(target) => {
+                if let Some(d) = self.item_drag.as_mut() {
+                    if d.over.as_ref() == Some(&target) {
+                        d.over = None;
+                    }
+                }
+            }
+            Message::ItemDrop => {
+                if let Some(d) = self.item_drag.take() {
+                    if let Some(target) = d.over {
+                        match d.item {
+                            ItemRef::Task(id) => self.store.move_task(&id, &target),
+                            ItemRef::Folder(id) => self.store.move_folder(&id, &target),
+                        }
+                    }
+                }
+            }
 
             // ----- settings window -----
             Message::OpenSettings => {
@@ -1158,6 +1672,7 @@ impl Application for App {
             }
             Message::CloseSettings => {
                 self.confirm_restore = false;
+                self.settings_maximized = false;
                 if self.settings.display == DisplayMode::Panel {
                     // Nothing else is shown by this process while the list lives in the panel.
                     std::process::exit(0);
@@ -1180,6 +1695,10 @@ impl Application for App {
                 // Always start from what is on disk (the widget may have changed it).
                 self.settings = Settings::load();
                 self.store = Store::load();
+                self.editing = None;
+                self.item_drag = None;
+                self.context = None;
+                self.confirm_folder = None;
                 let Some(main_id) = self.core.main_window_id() else {
                     return Task::none();
                 };
@@ -1196,6 +1715,10 @@ impl Application for App {
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
+                    self.editing = None;
+                    self.item_drag = None;
+                    self.context = None;
+                    self.confirm_folder = None;
                 }
             }
 
@@ -1223,12 +1746,21 @@ impl Application for App {
                     }
                 }
             }
-            Message::SetTime24(v) => {
-                self.settings.time_24h = v;
+            Message::SetClock(v) => {
+                self.settings.show_clock = v;
                 return self.apply_setting_change(false);
             }
-            Message::SetSeconds(v) => {
-                self.settings.show_seconds = v;
+            Message::SetOpacitySystem(system) => {
+                // Switching to a custom value starts from what the system uses right now.
+                self.settings.opacity = if system {
+                    None
+                } else {
+                    Some(system_alpha().clamp(MIN_OPACITY, 1.0))
+                };
+                return self.apply_setting_change(false);
+            }
+            Message::SetOpacity(pct) => {
+                self.settings.opacity = Some((f32::from(pct) / 100.0).clamp(MIN_OPACITY, 1.0));
                 return self.apply_setting_change(false);
             }
             Message::SetMonitor(id) => {
@@ -1238,10 +1770,6 @@ impl Application for App {
             Message::SetAbove(v) => {
                 self.settings.above_windows = v;
                 return self.apply_setting_change(true);
-            }
-            Message::SetOpacity(v) => {
-                self.settings.opacity = (v.round() as u32).clamp(30, 100);
-                self.settings.save();
             }
             Message::SetAutostart(v) => {
                 autostart::set(v);
