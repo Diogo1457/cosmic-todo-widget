@@ -1,1 +1,15 @@
+# Rust build output (the justfile also keeps all Flatpak build state in target/)
 /target
+
+# flatpak-builder, if run by hand instead of through `just`
+/.flatpak-builder
+/build-dir
+/repo
+*.flatpak
+*.flatpakref
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

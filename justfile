@@ -31,7 +31,11 @@ launcher_file     := apps_dir + "/todo-widget.desktop"
 applet_bin        := bin_dir + "/todo-widget-applet"
 applet_comm       := "todo-widget-app"
 applet_file       := apps_dir + "/io.github.user.CosmicTodoWidget.desktop"
-old_settings_file := apps_dir + "/todo-widget-settings.desktop"   # installed by older versions
+
+# Flatpak
+flatpak_id       := "io.github.user.CosmicTodoWidget"
+flatpak_dir      := src + "/flatpak"
+flatpak_manifest := flatpak_dir + "/" + flatpak_id + ".yml"
 
 # Options (override on the command line, e.g. `just yes=1 remove`)
 yes      := "0"
@@ -205,8 +209,6 @@ _install-files: _check-built stop _stop-applet _write-launcher
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Installing"
-    pkill -f '^python3? .*todo_widget\.py' 2>/dev/null || true     # old Python version, if running
-    rm -f "{{data_dir}}/todo_widget.py"
     mkdir -p "{{bin_dir}}"
     install -m 755 "{{src}}/target/release/{{app}}" "{{bin}}"
     ln -sf "{{bin}}" "{{applet_bin}}"
@@ -216,7 +218,6 @@ _write-launcher:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p "{{apps_dir}}"
-    rm -f "{{old_settings_file}}"
     cat > "{{applet_file}}" <<EOF
     [Desktop Entry]
     Type=Application
@@ -251,7 +252,7 @@ _write-launcher:
 [private]
 _remove-app: stop _stop-applet
     @echo "==> Removing {{app}}"
-    @rm -f "{{bin}}" "{{applet_bin}}" "{{applet_file}}" "{{autostart_file}}" "{{launcher_file}}" "{{old_settings_file}}"
+    @rm -f "{{bin}}" "{{applet_bin}}" "{{applet_file}}" "{{autostart_file}}" "{{launcher_file}}"
 
 [private]
 _delete-data:
@@ -284,3 +285,37 @@ _confirm prompt:
         [yY]|[yY][eE][sS]) ;;
         *) echo "Cancelled."; exit 1 ;;
     esac
+
+# ----------------------------------------------------------------------------- flatpak
+
+# generate flatpak/cargo-sources.json from Cargo.lock (re-run after changing dependencies)
+flatpak-sources:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tools="{{src}}/target/flatpak-builder-tools"
+    venv="{{src}}/target/flatpak-venv"
+    mkdir -p "{{src}}/target"
+    [ -d "$tools" ] || git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools "$tools"
+    [ -d "$venv" ] || python3 -m venv "$venv"
+    "$venv/bin/pip" install --quiet aiohttp tomlkit
+    "$venv/bin/python" "$tools/cargo/flatpak-cargo-generator.py" "{{src}}/Cargo.lock" -o "{{flatpak_dir}}/cargo-sources.json"
+
+# build and install the Flatpak for the current user (needs flatpak and flatpak-builder)
+flatpak-build: flatpak-sources
+    cd "{{src}}" && flatpak-builder --user --install --install-deps-from=flathub --force-clean \
+        --state-dir="{{src}}/target/flatpak-state" "{{src}}/target/flatpak-build" "{{flatpak_manifest}}"
+
+# run the installed Flatpak (the desktop widget / settings, depending on your Display setting)
+flatpak-run:
+    flatpak run {{flatpak_id}}
+
+# build a single-file bundle: target/todo-widget.flatpak
+flatpak-bundle: flatpak-sources
+    cd "{{src}}" && flatpak-builder --force-clean --repo="{{src}}/target/flatpak-repo" \
+        --state-dir="{{src}}/target/flatpak-state" "{{src}}/target/flatpak-build" "{{flatpak_manifest}}"
+    flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo "{{src}}/target/flatpak-repo" "{{src}}/target/todo-widget.flatpak" {{flatpak_id}}
+    @echo "==> {{src}}/target/todo-widget.flatpak"
+
+# remove the Flatpak (add --delete-data via flatpak itself if you also want its tasks gone)
+flatpak-uninstall:
+    flatpak uninstall --user -y {{flatpak_id}}

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Todo Widget
+Comment=Daily to-do list in the panel
+Exec=cosmic-todo-widget --applet
+Icon=io.github.user.CosmicTodoWidget
+Terminal=false
+Categories=COSMIC;
+NoDisplay=true
+StartupNotify=false
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10

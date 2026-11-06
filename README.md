@@ -5,9 +5,9 @@ A daily to-do list that lives on your desktop, like a sticky note. It is written
 ## Features
 
 - Add, tick off, rename, delete and reorder tasks (drag the ≡ handle); pending tasks are listed first and completed ones go to the bottom.
-- Folders: click a folder name to select it and new tasks are added straight into it (✕ next to the entry field goes back to the top level). Drag tasks onto a folder to move them in. Deleting a folder that is not empty asks for confirmation, because its tasks are deleted with it.
+- Folders: click a folder (or its row) to select it and new tasks are added straight into it; a new folder is selected automatically (✕ next to the entry field goes back to the top level). Drag tasks onto a folder to move them in. Deleting a folder that is not empty asks for confirmation, because its tasks are deleted with it.
 - Right-click a task, a folder or the empty space for **New task** / **New folder**.
-- Two display modes: a **desktop widget** or a **panel applet** (popup with a fixed size and room for 5 tasks without scrolling).
+- Two display modes: a **desktop widget** (native install only) or a **panel applet** (popup with a fixed size and room for 5 tasks without scrolling). While the display is *Show as Widget*, clicking the applet in the panel opens the settings.
 - Progress bar showing how many tasks are done.
 - Move it by dragging the header, resize it with the ◢ handle in the bottom-right corner (double-click the handle for automatic height).
 - Close it with the ✕ button in the header.
@@ -49,6 +49,8 @@ Run `just` (or `just --list`) for the full list.
 | `start` / `stop` / `restart` | Control the widget |
 | `status` | Show what is installed and whether it is running |
 | `settings` | Open the settings window |
+| `flatpak-build` / `flatpak-run` | Build + install the Flatpak for your user / run it (see [Flatpak](#flatpak)) |
+| `flatpak-bundle` / `flatpak-uninstall` | Make `target/todo-widget.flatpak` / remove the Flatpak |
 | `uninstall` | Remove the app and its autostart entry; keeps your tasks and settings |
 | `remove` | Uninstall and delete your tasks and settings |
 | `clean` | Delete the `target/` build folder |
@@ -85,7 +87,20 @@ Click **Settings** on the widget (or run `cosmic-todo-widget --settings`):
 2. Add the **Todo Widget** applet: COSMIC Settings → Desktop → Panel (or Dock) → Configure panel applets.
 3. Click its icon in the panel to open the list.
 
-While the display is set to *Show as Widget*, the applet's panel icon simply starts the widget. Settings opened from the applet appear in their own window.
+While the display is set to *Show as Widget*, clicking the applet's panel icon opens the settings window (in the running widget; if the widget is not running it is started together with the settings). Settings opened from the applet in panel mode appear in their own window.
+
+## Flatpak
+
+Needs `flatpak` and `flatpak-builder` (`sudo apt install flatpak flatpak-builder`, plus the Flathub remote). Then:
+
+```bash
+just flatpak-build     # generates flatpak/cargo-sources.json, builds, installs for your user
+just flatpak-run       # start it
+```
+
+The first build downloads the runtime, the Rust SDK extension and all crates, and takes a while. Afterwards log out and in (or restart the panel) so COSMIC finds the exported applet, then add **Todo Widget** in COSMIC Settings → Desktop → Panel → Configure panel applets. Inside the Flatpak your data lives in `~/.var/app/io.github.user.CosmicTodoWidget/` (copy `config/todo-widget` and `data/todo-widget` there to keep an existing list). 
+
+**Limitation:** the desktop widget does not work in the Flatpak. COSMIC's compositor only offers `wlr-layer-shell` to clients without a Wayland security context, and Flatpak always attaches one, so a sandboxed app cannot draw on the desktop (no permission can change that). The Flatpak therefore always uses *Show on Panel*; the Display choice and "Start at login" are hidden. For the desktop widget use the native install (`just install`).
 
 ## Where your data is stored
 
@@ -101,8 +116,13 @@ The first two are plain JSON. `uninstall` leaves them alone; `remove` and `nuke`
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | The widget and the panel applet: layer-shell surface, popup, UI, settings window, move/resize |
-| `src/config.rs` | Settings, task storage and the autostart entry |
+| `src/main.rs` | Command line and start-up |
+| `src/app/` | The libcosmic application: `mod.rs` (state, lifecycle), `message.rs`, `update.rs` (event handling), `view/` (list, card + popup, settings window), `style.rs`, `geometry.rs`, `monitors.rs`, `surface.rs` (layer-shell surface) |
+| `src/settings.rs` | Settings file |
+| `src/store.rs` | Tasks, folders, saved position and size |
+| `src/autostart.rs` | The "Start at login" entry |
+| `src/paths.rs` | Directories, single-instance lock, settings request between applet and widget |
+| `flatpak/` | Flatpak manifest, desktop files, metainfo, icon |
 | `Cargo.toml` / `Cargo.lock` | Dependencies (libcosmic is pinned to a specific commit) |
 | `justfile` | Build, install and management commands (`just --list`) |
 

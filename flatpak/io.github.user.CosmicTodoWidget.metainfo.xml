@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.user.CosmicTodoWidget</id>
+  <name>Todo Widget</name>
+  <summary>Daily to-do list for the COSMIC desktop</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <description>
+    <p>A daily to-do list for the COSMIC panel. Tasks can be grouped in folders, reordered by drag and drop, and the list follows the COSMIC theme.</p>
+    <p>The Flatpak version runs as a panel applet. The free-standing desktop widget needs the native install, because COSMIC does not let sandboxed apps draw on the desktop.</p>
+  </description>
+  <launchable type="desktop-id">io.github.user.CosmicTodoWidget.Widget.desktop</launchable>
+  <provides>
+    <binary>cosmic-todo-widget</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-06"/>
+  </releases>
+</component>

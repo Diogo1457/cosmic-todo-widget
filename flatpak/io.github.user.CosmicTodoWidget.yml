@@ -1,0 +1,50 @@
+# Flatpak manifest. Build with `just flatpak-build` (see README, "Flatpak").
+# Change the app id everywhere (this file name, `app-id`, the .desktop/.metainfo files, and
+# `APP_ID` in src/paths.rs) if you publish it under your own name.
+app-id: io.github.user.CosmicTodoWidget
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: cosmic-todo-widget
+
+finish-args:
+  # Wayland only. Only the panel applet and the settings window work in the sandbox: COSMIC does
+  # not offer wlr-layer-shell to Flatpak apps, so the desktop widget needs the native install.
+  - --socket=wayland
+  - --device=dri
+  # COSMIC theme / frosted-glass settings.
+  - --filesystem=xdg-config/cosmic:ro
+  - --talk-name=com.system76.CosmicSettingsDaemon
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/cosmic-todo-widget/cargo
+
+modules:
+  - name: cosmic-todo-widget
+    buildsystem: simple
+    build-commands:
+      # cosmic-panel-config depends on libcosmic WITHOUT a rev, which Cargo treats as a second
+      # source next to our `rev = ...` one. Point it at the same vendored copy (same commit).
+      - printf '\n[source.libcosmic-default]\ngit = "https://github.com/pop-os/libcosmic"\nreplace-with = "vendored-sources"\n' >> "$CARGO_HOME/config"
+      - cargo --offline fetch --manifest-path Cargo.toml --locked
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/cosmic-todo-widget -t /app/bin
+      # Panel applet entry (must carry the app id as its file name for cosmic-panel).
+      - install -Dm644 flatpak/io.github.user.CosmicTodoWidget.desktop -t /app/share/applications
+      # Launcher entry that starts the widget / opens the settings.
+      - install -Dm644 flatpak/io.github.user.CosmicTodoWidget.Widget.desktop -t /app/share/applications
+      - install -Dm644 flatpak/io.github.user.CosmicTodoWidget.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 flatpak/io.github.user.CosmicTodoWidget.svg -t /app/share/icons/hicolor/scalable/apps
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - .flatpak-builder
+          - .git
+      # Generated from Cargo.lock by `just flatpak-sources` (includes the pinned libcosmic git rev).
+      - cargo-sources.json
