@@ -31,7 +31,7 @@ Put the `justfile` next to `Cargo.toml`, then run this from that folder:
 just install
 ```
 
-This installs the build dependencies, Rust (if needed), builds the widget (the first build takes a few minutes), installs it to `~/.local/bin`, adds a launcher entry, and starts it.
+This installs the build dependencies, Rust (if needed), builds the widget (the first build takes a few minutes), installs it to `~/.local/bin`, installs the desktop entries and icon from `resources/` (to `~/.local/share/applications` and `~/.local/share/icons`), and starts it.
 
 The widget does not start at login by default. To change that, turn on **Start at login** in its Settings. If you close it with ✕, start it again from the app launcher ("Todo Widget") or with `just start`.
 
@@ -49,6 +49,7 @@ Run `just` (or `just --list`) for the full list.
 | `start` / `stop` / `restart` | Control the widget |
 | `status` | Show what is installed and whether it is running |
 | `settings` | Open the settings window |
+| `dist` | Build the release tarball `target/dist/cosmic-todo-widget-v<version>-<arch>-linux.tar.gz` |
 | `flatpak-build` / `flatpak-run` | Build + install the Flatpak for your user / run it (see [Flatpak](#flatpak)) |
 | `flatpak-bundle` / `flatpak-uninstall` | Make `target/todo-widget.flatpak` / remove the Flatpak |
 | `uninstall` | Remove the app and its autostart entry; keeps your tasks and settings |
@@ -98,7 +99,7 @@ just flatpak-build     # generates flatpak/cargo-sources.json, builds, installs 
 just flatpak-run       # start it
 ```
 
-The first build downloads the runtime, the Rust SDK extension and all crates, and takes a while. Afterwards log out and in (or restart the panel) so COSMIC finds the exported applet, then add **Todo Widget** in COSMIC Settings → Desktop → Panel → Configure panel applets. Inside the Flatpak your data lives in `~/.var/app/io.github.user.CosmicTodoWidget/` (copy `config/todo-widget` and `data/todo-widget` there to keep an existing list). 
+The first build downloads the runtime, the Rust SDK extension and all crates, and takes a while. Afterwards log out and in (or restart the panel) so COSMIC finds the exported applet, then add **Todo Widget** in COSMIC Settings → Desktop → Panel → Configure panel applets. Inside the Flatpak your data lives in `~/.var/app/io.github.Diogo1457.CosmicTodoWidget/` (copy `config/todo-widget` and `data/todo-widget` there to keep an existing list). 
 
 **Limitation:** the desktop widget does not work in the Flatpak. COSMIC's compositor only offers `wlr-layer-shell` to clients without a Wayland security context, and Flatpak always attaches one, so a sandboxed app cannot draw on the desktop (no permission can change that). The Flatpak therefore always uses *Show on Panel*; the Display choice and "Start at login" are hidden. For the desktop widget use the native install (`just install`).
 
@@ -122,7 +123,8 @@ The first two are plain JSON. `uninstall` leaves them alone; `remove` and `nuke`
 | `src/store.rs` | Tasks, folders, saved position and size |
 | `src/autostart.rs` | The "Start at login" entry |
 | `src/paths.rs` | Directories, single-instance lock, settings request between applet and widget |
-| `flatpak/` | Flatpak manifest, desktop files, metainfo, icon |
+| `resources/` | Everything installed besides the binary: the two `.desktop` files, the icon, the metainfo, the autostart template (`autostart.desktop.in`, compiled into the binary) and `install.sh` (used by `just install` and shipped in the release tarball) |
+| `flatpak/` | Flatpak manifest and `cargo-sources.json` |
 | `Cargo.toml` / `Cargo.lock` | Dependencies (libcosmic is pinned to a specific commit) |
 | `justfile` | Build, install and management commands (`just --list`) |
 

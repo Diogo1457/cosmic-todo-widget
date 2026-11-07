@@ -8,7 +8,7 @@
 use std::{fs, path::{Path, PathBuf}, time::Duration};
 
 /// Application id (also the name of the panel applet's `.desktop` file).
-pub const APP_ID: &str = "io.github.user.CosmicTodoWidget";
+pub const APP_ID: &str = "io.github.Diogo1457.CosmicTodoWidget";
 
 /// Name of the per-app folder inside the config and data directories.
 const DIR_NAME: &str = "todo-widget";

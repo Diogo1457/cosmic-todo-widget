@@ -1,9 +1,14 @@
 //! "Start at login" is on exactly when the autostart `.desktop` file exists, so the file is the
 //! single source of truth (nothing about it is stored in `settings.json`). Off by default.
+//!
+//! The file's content comes from `resources/autostart.desktop.in`; only `@EXEC@` is filled in.
 
 use std::{fs, path::PathBuf};
 
 use crate::paths;
+
+/// Template of the autostart entry (`@EXEC@` is replaced by the command line).
+const TEMPLATE: &str = include_str!("../resources/autostart.desktop.in");
 
 /// Real `~/.config`. Inside a Flatpak `$XDG_CONFIG_HOME` is the app's private directory, so the
 /// host's one is used instead (it needs the `xdg-config/autostart` permission).
@@ -61,11 +66,7 @@ pub fn set(enabled: bool) {
         eprintln!("Could not find the executable path; autostart not enabled");
         return;
     };
-    let mut entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Todo Widget\n\
-         Comment=Daily to-do list widget\nExec={exec}\nTerminal=false\n\
-         X-GNOME-Autostart-enabled=true\n"
-    );
+    let mut entry = TEMPLATE.replace("@EXEC@", &exec);
     if let Some(id) = paths::flatpak_id() {
         entry.push_str(&format!("X-Flatpak={id}\n"));
     }

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Todo Widget
+Comment=Daily to-do list widget
+Exec=@EXEC@
+Terminal=false
+X-GNOME-Autostart-enabled=true

@@ -26,15 +26,23 @@ data_dir          := home + "/.local/share/todo-widget"   # tasks.json + positio
 config_dir        := home + "/.config/todo-widget"        # settings.json
 bin               := bin_dir + "/" + app
 autostart_file    := home + "/.config/autostart/todo-widget.desktop"   # created by the Settings toggle
-launcher_file     := apps_dir + "/todo-widget.desktop"
 # panel applet: a symlink with its own name so it can be stopped separately (comm is 15 chars max)
 applet_bin        := bin_dir + "/todo-widget-applet"
 applet_comm       := "todo-widget-app"
-applet_file       := apps_dir + "/io.github.user.CosmicTodoWidget.desktop"
+
+# Files shipped with the app live in resources/ (desktop entries, icon, metainfo, installer).
+# The desktop entries are installed under the app id, so the launcher and panel find them.
+app_id            := "io.github.Diogo1457.CosmicTodoWidget"
+res_dir           := src + "/resources"
+installer         := res_dir + "/install.sh"
+applet_file       := apps_dir + "/" + app_id + ".desktop"
+launcher_file     := apps_dir + "/" + app_id + ".Widget.desktop"
+icon_file         := home + "/.local/share/icons/hicolor/scalable/apps/" + app_id + ".svg"
+version           := `sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1`
 
 # Flatpak
-flatpak_id       := "io.github.user.CosmicTodoWidget"
-flatpak_dir      := src + "/flatpak"
+flatpak_id       := app_id
+flatpak_dir      := src + "/flatpak"   # manifest + cargo-sources.json
 flatpak_manifest := flatpak_dir + "/" + flatpak_id + ".yml"
 
 # Options (override on the command line, e.g. `just yes=1 remove`)
@@ -141,6 +149,7 @@ status:
     echo "Binary:        {{bin}} ($(yes_no "{{bin}}"))"
     echo "Launcher:      {{launcher_file}} ($(yes_no "{{launcher_file}}"))"
     echo "Panel applet:  {{applet_file}} ($(yes_no "{{applet_file}}"))"
+    echo "Icon:          {{icon_file}} ($(yes_no "{{icon_file}}"))"
     echo "Autostart:     {{autostart_file}} ($(yes_no "{{autostart_file}}"))"
     echo "Tasks/UI:      {{data_dir}} ($(yes_no "{{data_dir}}"))"
     echo "Settings:      {{config_dir}} ($(yes_no "{{config_dir}}"))"
@@ -205,54 +214,14 @@ _check-built:
     @[ -x "{{src}}/target/release/{{app}}" ] || { echo "Error: Nothing built yet - run: just build" >&2; exit 1; }
 
 [private]
-_install-files: _check-built stop _stop-applet _write-launcher
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "==> Installing"
-    mkdir -p "{{bin_dir}}"
-    install -m 755 "{{src}}/target/release/{{app}}" "{{bin}}"
-    ln -sf "{{bin}}" "{{applet_bin}}"
-
-[private]
-_write-launcher:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{apps_dir}}"
-    cat > "{{applet_file}}" <<EOF
-    [Desktop Entry]
-    Type=Application
-    Name=Todo Widget
-    Comment=Daily to-do list in the panel
-    Exec={{applet_bin}} --applet
-    Icon=view-list-symbolic
-    Terminal=false
-    Categories=COSMIC;
-    NoDisplay=true
-    StartupNotify=false
-    X-CosmicApplet=true
-    X-CosmicHoverPopup=Auto
-    X-OverflowPriority=10
-    EOF
-    cat > "{{launcher_file}}" <<EOF
-    [Desktop Entry]
-    Type=Application
-    Name=Todo Widget
-    Comment=Daily to-do list widget
-    Exec=sh -c 'pkill -x {{comm}}; exec {{bin}}'
-    Icon=view-list-symbolic
-    Terminal=false
-    Categories=Utility;
-    Actions=Settings;
-
-    [Desktop Action Settings]
-    Name=Settings
-    Exec=sh -c 'pkill -x {{comm}}; exec {{bin}} --settings'
-    EOF
+_install-files: _check-built stop _stop-applet
+    @echo "==> Installing"
+    @RESOURCES_DIR="{{res_dir}}" BIN_SRC="{{src}}/target/release/{{app}}" bash "{{installer}}"
 
 [private]
 _remove-app: stop _stop-applet
     @echo "==> Removing {{app}}"
-    @rm -f "{{bin}}" "{{applet_bin}}" "{{applet_file}}" "{{autostart_file}}" "{{launcher_file}}"
+    @QUIET=1 bash "{{installer}}" uninstall
 
 [private]
 _delete-data:
@@ -285,6 +254,24 @@ _confirm prompt:
         [yY]|[yY][eE][sS]) ;;
         *) echo "Cancelled."; exit 1 ;;
     esac
+
+# ----------------------------------------------------------------------------- release
+
+# build target/dist/<name>/ (binary, install.sh, resources/, LICENSE, README) and <name>.tar.gz
+dist: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="{{app}}-v{{version}}-{{arch()}}-{{os()}}"
+    out="{{src}}/target/dist"
+    rm -rf "$out"
+    mkdir -p "$out/$name/resources"
+    install -m 755 "{{src}}/target/release/{{app}}" "$out/$name/{{app}}"
+    install -m 755 "{{installer}}" "$out/$name/install.sh"
+    install -m 644 "{{res_dir}}/{{app_id}}".desktop "{{res_dir}}/{{app_id}}".Widget.desktop \
+        "{{res_dir}}/{{app_id}}".svg "$out/$name/resources/"
+    install -m 644 "{{src}}/LICENSE" "{{src}}/README.md" "$out/$name/"
+    tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+    echo "==> $out/$name.tar.gz"
 
 # ----------------------------------------------------------------------------- flatpak
 
