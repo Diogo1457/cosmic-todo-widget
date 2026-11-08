@@ -71,6 +71,8 @@ fn main() -> cosmic::iced::Result {
     if args.background && Settings::load().display == DisplayMode::Panel {
         return Ok(());
     }
-    let settings = cosmic::app::Settings::default().transparent(true).no_main_window(true);
+    let settings = cosmic::app::Settings::default()
+        .transparent(true)
+        .no_main_window(true);
     cosmic::app::run::<App>(settings, args)
 }

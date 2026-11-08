@@ -5,7 +5,7 @@
 
 use std::{fs, path::PathBuf};
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::{autostart, paths};
 
@@ -59,11 +59,16 @@ impl Settings {
 
     /// Loads the settings; anything missing or invalid falls back to the default.
     pub fn load() -> Self {
-        let mut s = Settings { autostart: autostart::is_enabled(), ..Settings::default() };
-        let Ok(text) = fs::read_to_string(Self::path()) else {
-            return s;
-        };
-        let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) else {
+        let text = fs::read_to_string(Self::path()).unwrap_or_default();
+        let mut s = Self::parse(&text);
+        s.autostart = autostart::is_enabled();
+        s
+    }
+
+    /// Reads settings from JSON text. Unknown keys and invalid values are ignored.
+    fn parse(text: &str) -> Self {
+        let mut s = Settings::default();
+        let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else {
             return s;
         };
 
@@ -92,6 +97,13 @@ impl Settings {
     }
 
     pub fn save(&self) {
+        if let Some(text) = self.to_json() {
+            paths::write_atomic(&Self::path(), &text);
+        }
+    }
+
+    /// The text written to `settings.json` ("Start at login" is not part of it).
+    fn to_json(&self) -> Option<String> {
         let mut map = Map::new();
         map.insert(
             "display".into(),
@@ -106,8 +118,112 @@ impl Settings {
         }
         map.insert("monitor".into(), json!(self.monitor));
         map.insert("above_windows".into(), json!(self.above_windows));
-        if let Ok(text) = serde_json::to_string_pretty(&Value::Object(map)) {
-            paths::write_atomic(&Self::path(), &text);
+        serde_json::to_string_pretty(&Value::Object(map)).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_panel_system_transparency_and_no_clock() {
+        let s = Settings::default();
+        assert_eq!(s.display, DisplayMode::Panel);
+        assert_eq!(s.opacity, None);
+        assert!(!s.show_clock);
+        assert_eq!(s.monitor, "auto");
+        assert!(!s.above_windows);
+        assert!(!s.autostart);
+    }
+
+    #[test]
+    fn empty_or_broken_text_gives_the_defaults() {
+        for text in ["", "   ", "not json", "[1, 2]", "42", "null"] {
+            assert_eq!(
+                Settings::parse(text),
+                Settings::default(),
+                "input: {text:?}"
+            );
         }
+    }
+
+    #[test]
+    fn display_mode_is_read() {
+        assert_eq!(
+            Settings::parse(r#"{"display":"panel"}"#).display,
+            DisplayMode::Panel
+        );
+        // Inside a Flatpak the widget is not possible and the panel is forced.
+        let widget = if paths::widget_supported() {
+            DisplayMode::Widget
+        } else {
+            DisplayMode::Panel
+        };
+        assert_eq!(Settings::parse(r#"{"display":"widget"}"#).display, widget);
+        assert_eq!(
+            Settings::parse(r#"{"display":"sideways"}"#).display,
+            DisplayMode::Panel
+        );
+    }
+
+    #[test]
+    fn opacity_is_kept_within_the_allowed_range() {
+        let opacity = |text: &str| Settings::parse(text).opacity;
+        assert_eq!(opacity(r#"{"opacity":0.1}"#), Some(MIN_OPACITY));
+        assert_eq!(opacity(r#"{"opacity":7}"#), Some(1.0));
+        assert_eq!(opacity(r#"{"opacity":0.5}"#), Some(0.5));
+        assert_eq!(opacity(r#"{"opacity":"half"}"#), None);
+        assert_eq!(opacity("{}"), None);
+    }
+
+    #[test]
+    fn other_values_are_read() {
+        let s = Settings::parse(r#"{"show_clock":true,"monitor":"ACME|X1","above_windows":true}"#);
+        assert!(s.show_clock && s.above_windows);
+        assert_eq!(s.monitor, "ACME|X1");
+    }
+
+    #[test]
+    fn wrong_types_and_unknown_keys_are_ignored() {
+        let s =
+            Settings::parse(r#"{"show_clock":"yes","monitor":5,"above_windows":1,"colour":"red"}"#);
+        assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn settings_survive_being_written_and_read_again() {
+        let s = Settings {
+            display: DisplayMode::Panel,
+            opacity: Some(0.55),
+            show_clock: true,
+            monitor: "ACME|X1#1".into(),
+            above_windows: true,
+            autostart: false,
+        };
+        let back = Settings::parse(&s.to_json().unwrap());
+        assert_eq!(back.monitor, s.monitor);
+        assert!(back.show_clock && back.above_windows);
+        assert!((back.opacity.unwrap() - 0.55).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_file_names_the_display_mode() {
+        let s = Settings {
+            display: DisplayMode::Widget,
+            ..Settings::default()
+        };
+        assert!(s.to_json().unwrap().contains(r#""display": "widget""#));
+        assert!(Settings::default()
+            .to_json()
+            .unwrap()
+            .contains(r#""display": "panel""#));
+    }
+
+    #[test]
+    fn system_transparency_writes_no_opacity_and_autostart_is_never_stored() {
+        let text = Settings::default().to_json().unwrap();
+        assert!(!text.contains("opacity"));
+        assert!(!text.contains("autostart"));
     }
 }

@@ -1,6 +1,6 @@
 //! The two containers the list is shown in: the desktop widget card and the panel popup.
 
-use cosmic::iced::{Alignment, Length, Limits, mouse};
+use cosmic::iced::{mouse, Alignment, Length, Limits};
 use cosmic::widget::{self, autosize};
 use cosmic::Element;
 
@@ -16,7 +16,9 @@ impl App {
             .push(widget::text::title2("Today"))
             .width(Length::Fill);
         if self.settings.show_clock {
-            col = col.push(widget::text::caption(self.now.format("%A, %d %B %Y").to_string()));
+            col = col.push(widget::text::caption(
+                self.now.format("%A, %d %B %Y").to_string(),
+            ));
         }
         col.into()
     }
@@ -87,7 +89,10 @@ impl App {
         // while resizing, the content is a fixed-size transparent area so the surface itself
         // never has to change size.
         let (w, h) = if self.resizing() {
-            (Length::Fixed(self.max_w_at_x()), Length::Fixed(self.max_card_h_at_y()))
+            (
+                Length::Fixed(self.max_w_at_x()),
+                Length::Fixed(self.max_card_h_at_y()),
+            )
         } else {
             (Length::Shrink, Length::Shrink)
         };
@@ -119,7 +124,11 @@ impl App {
             .push(self.tools_row());
         self.core
             .applet
-            .popup_container(widget::container(content).padding(16).width(Length::Fixed(POPUP_W)))
+            .popup_container(
+                widget::container(content)
+                    .padding(16)
+                    .width(Length::Fixed(POPUP_W)),
+            )
             .into()
     }
 }

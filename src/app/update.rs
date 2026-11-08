@@ -9,14 +9,14 @@ use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::wayland;
 use cosmic::iced::platform_specific::shell::commands::layer_surface::destroy_layer_surface;
 use cosmic::iced::platform_specific::shell::commands::popup::get_popup;
-use cosmic::iced::{Limits, Point, window};
+use cosmic::iced::{window, Limits, Point};
 
 use super::geometry::POPUP_W;
 use super::message::{ContextTarget, Drag, DragKind, ItemDrag, Message};
 use super::monitors::Monitor;
 use super::style::system_alpha;
 use super::{spawn_child, App};
-use crate::settings::{DisplayMode, MIN_OPACITY, Settings};
+use crate::settings::{DisplayMode, Settings, MIN_OPACITY};
 use crate::store::{DropTarget, ItemRef, SavedSize, Store};
 use crate::{autostart, paths};
 
@@ -41,7 +41,10 @@ impl App {
         // Any action other than typing in / cancelling the rename box confirms the rename
         // (clicking elsewhere, another button, starting a drag, ...).
         let keeps_rename = is_background(&message)
-            || matches!(message, Message::Input(_) | Message::EditInput(_) | Message::EditCancel);
+            || matches!(
+                message,
+                Message::Input(_) | Message::EditInput(_) | Message::EditCancel
+            );
         if !keeps_rename {
             self.commit_edit();
         }
@@ -155,7 +158,11 @@ impl App {
                 }
             }
             Message::ItemDrop => {
-                if let Some(ItemDrag { item, over: Some(target) }) = self.item_drag.take() {
+                if let Some(ItemDrag {
+                    item,
+                    over: Some(target),
+                }) = self.item_drag.take()
+                {
                     match item {
                         ItemRef::Task(id) => self.store.move_task(&id, &target),
                         ItemRef::Folder(id) => self.store.move_folder(&id, &target),
@@ -202,8 +209,11 @@ impl App {
             }
             Message::SetOpacitySystem(system) => {
                 // Switching to a custom value starts from what the system uses right now.
-                self.settings.opacity =
-                    if system { None } else { Some(system_alpha().clamp(MIN_OPACITY, 1.0)) };
+                self.settings.opacity = if system {
+                    None
+                } else {
+                    Some(system_alpha().clamp(MIN_OPACITY, 1.0))
+                };
                 return self.apply_setting_change(false);
             }
             Message::SetOpacity(pct) => {
@@ -309,10 +319,22 @@ impl App {
 
     fn start_edit(&mut self, item: ItemRef) -> Task<Message> {
         let text = match &item {
-            ItemRef::Task(id) => self.store.tasks.iter().find(|t| t.id == *id).map(|t| t.text.clone()),
-            ItemRef::Folder(id) => self.store.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()),
+            ItemRef::Task(id) => self
+                .store
+                .tasks
+                .iter()
+                .find(|t| t.id == *id)
+                .map(|t| t.text.clone()),
+            ItemRef::Folder(id) => self
+                .store
+                .folders
+                .iter()
+                .find(|f| f.id == *id)
+                .map(|f| f.name.clone()),
         };
-        let Some(text) = text else { return Task::none() };
+        let Some(text) = text else {
+            return Task::none();
+        };
         self.editing = Some((item, text));
         Self::focus_edit()
     }
@@ -322,9 +344,12 @@ impl App {
     fn new_task_from_menu(&mut self, menu_target: Option<ContextTarget>) -> Task<Message> {
         let folder = match menu_target {
             Some(ContextTarget::Folder(id)) => Some(id),
-            Some(ContextTarget::Task(id)) => {
-                self.store.tasks.iter().find(|t| t.id == id).and_then(|t| t.folder.clone())
-            }
+            Some(ContextTarget::Task(id)) => self
+                .store
+                .tasks
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| t.folder.clone()),
             _ => None,
         };
         if let Some(fid) = &folder {
@@ -336,10 +361,13 @@ impl App {
 
     /// Tracks what the dragged item is over, ignoring targets that make no sense.
     fn drag_over(&mut self, target: DropTarget) {
-        let Some(d) = self.item_drag.as_mut() else { return };
+        let Some(d) = self.item_drag.as_mut() else {
+            return;
+        };
         let skip = match (&d.item, &target) {
             // Not onto itself.
-            (ItemRef::Task(a), DropTarget::Task(b)) | (ItemRef::Folder(a), DropTarget::Folder(b)) => a == b,
+            (ItemRef::Task(a), DropTarget::Task(b))
+            | (ItemRef::Folder(a), DropTarget::Folder(b)) => a == b,
             // Folders are reordered on other folders (or the bottom zone) only.
             (ItemRef::Folder(_), DropTarget::Task(_)) => true,
             _ => false,
@@ -378,7 +406,10 @@ impl App {
         };
         let new_id = window::Id::unique();
         self.popup = Some(new_id);
-        let mut popup = self.core.applet.get_popup_settings(main_id, new_id, None, None, None);
+        let mut popup = self
+            .core
+            .applet
+            .get_popup_settings(main_id, new_id, None, None, None);
         popup.positioner.size_limits = Limits::NONE
             .min_width(POPUP_W)
             .max_width(POPUP_W)
@@ -390,7 +421,9 @@ impl App {
     // ---------- settings ----------
 
     fn set_display(&mut self, mode: DisplayMode) -> Task<Message> {
-        if self.settings.display == mode || (mode == DisplayMode::Widget && !paths::widget_supported()) {
+        if self.settings.display == mode
+            || (mode == DisplayMode::Widget && !paths::widget_supported())
+        {
             return Task::none();
         }
         self.settings.display = mode;
@@ -417,7 +450,10 @@ impl App {
     /// Resets settings, position and size (tasks and the display choice are kept).
     fn restore_defaults(&mut self) -> Task<Message> {
         let display = self.settings.display;
-        self.settings = Settings { display, ..Settings::default() };
+        self.settings = Settings {
+            display,
+            ..Settings::default()
+        };
         self.settings.save();
         autostart::set(self.settings.autostart);
         self.confirm_restore = false;
@@ -426,7 +462,11 @@ impl App {
         self.cur_w = self.default_w();
         self.pos = self.default_pos();
         self.store.set_ui(SavedSize::default());
-        if self.widget_mode() { self.rebuild_surface() } else { Task::none() }
+        if self.widget_mode() {
+            self.rebuild_surface()
+        } else {
+            Task::none()
+        }
     }
 
     // ---------- move / resize ----------
@@ -446,7 +486,9 @@ impl App {
     const MOVE_INTERVAL: Duration = Duration::from_millis(30);
 
     fn pointer_moved(&mut self, p: Point) -> Task<Message> {
-        let Some(d) = self.drag.as_mut() else { return Task::none() };
+        let Some(d) = self.drag.as_mut() else {
+            return Task::none();
+        };
         d.last = p;
         let Some(start) = d.start else {
             d.start = Some(p);

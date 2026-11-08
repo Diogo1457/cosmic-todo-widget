@@ -25,11 +25,11 @@ use chrono::{DateTime, Local};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::cctk::sctk::reexports::csd_frame::WindowState;
-use cosmic::iced::event::{self, PlatformSpecific, wayland};
+use cosmic::iced::event::{self, wayland, PlatformSpecific};
 use cosmic::iced::platform_specific::shell::commands::popup::destroy_popup;
-use cosmic::iced::{self, Color, Event, Point, Subscription, mouse, window};
+use cosmic::iced::{self, mouse, window, Color, Event, Point, Subscription};
 use cosmic::widget;
-use cosmic::{Application, Element, executor};
+use cosmic::{executor, Application, Element};
 
 use crate::paths;
 use crate::settings::{DisplayMode, Settings};
@@ -109,7 +109,9 @@ fn spawn_child(args: &[&str], slot: &mut Option<Child>) {
             return;
         }
     }
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     match Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
@@ -191,7 +193,9 @@ impl App {
 
     /// The selected folder, if it still exists.
     fn target_folder(&self) -> Option<String> {
-        self.selected_folder.clone().filter(|id| self.store.folder_exists(id))
+        self.selected_folder
+            .clone()
+            .filter(|id| self.store.folder_exists(id))
     }
 
     /// Deletes a folder with its tasks and forgets it as the target.
@@ -303,12 +307,15 @@ impl Application for App {
             }
             if self.widget_mode() {
                 // The panel applet asks the running widget to open its settings this way.
-                subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::CheckRequests));
+                subs.push(
+                    iced::time::every(Duration::from_secs(1)).map(|_| Message::CheckRequests),
+                );
             }
             subs.push(event::listen_with(|e, _status, id| match e {
-                Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Output(ev, wl))) => {
-                    Some(Message::Output(ev, wl))
-                }
+                Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Output(
+                    ev,
+                    wl,
+                ))) => Some(Message::Output(ev, wl)),
                 Event::PlatformSpecific(PlatformSpecific::Wayland(wayland::Event::Window(
                     wayland::WindowEvent::WindowState(state),
                 ))) => Some(Message::WindowState(
@@ -320,24 +327,31 @@ impl Application for App {
         }
         if self.drag.is_some() {
             subs.push(event::listen_with(|e, _status, _id| match e {
-                Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::Pointer(position)),
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::GripRelease),
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Pointer(position))
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::GripRelease)
+                }
                 _ => None,
             }));
         }
         if self.editing.is_some() || self.context.is_some() {
             // A press nobody handled (empty space) confirms the rename / closes the menu.
             subs.push(event::listen_with(|e, status, _id| match (e, status) {
-                (Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), event::Status::Ignored) => {
-                    Some(Message::EditClickAway)
-                }
+                (
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    event::Status::Ignored,
+                ) => Some(Message::EditClickAway),
                 _ => None,
             }));
         }
         if self.item_drag.is_some() {
             // Dropping happens wherever the button is released.
             subs.push(event::listen_with(|e, _status, _id| match e {
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::ItemDrop),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::ItemDrop)
+                }
                 _ => None,
             }));
         }
@@ -367,7 +381,11 @@ impl Application for App {
             return self.settings_window();
         }
         if self.args.applet {
-            return if self.popup == Some(id) { self.popup_view() } else { widget::space().into() };
+            return if self.popup == Some(id) {
+                self.popup_view()
+            } else {
+                widget::space().into()
+            };
         }
         self.widget_window()
     }

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Also used by the release workflow, so a release never ships untested code.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (default: the ref that triggered the run)"
+        type: string
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, lint, test, package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake git curl \
+            libxkbcommon-dev libwayland-dev libfontconfig-dev libfreetype-dev \
+            libinput-dev libudev-dev libseat-dev libgbm-dev libegl1-mesa-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Shell script
+        run: |
+          bash -n resources/install.sh
+          shellcheck resources/install.sh
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Build the release tarball
+        run: just dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: target/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

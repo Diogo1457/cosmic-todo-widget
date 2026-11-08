@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::wayland;
-use cosmic::iced::{Point, window};
+use cosmic::iced::{window, Point};
 
 use crate::settings::DisplayMode;
 use crate::store::{DropTarget, ItemRef};
@@ -47,6 +47,7 @@ pub(crate) struct ItemDrag {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // the Wayland output event is big but rare
 pub(crate) enum Message {
     /// Does nothing (results of tasks we do not care about).
     Noop,

@@ -1,0 +1,133 @@
+name: Release
+
+# A release is made for every tag that starts with "v" (for example v0.2.0):
+#   just bump 0.2.0   (edit the version, commit)
+#   just release      (checks, then creates and pushes the tag)
+#
+# To rebuild the files of an existing release (they are replaced):
+#   gh workflow run release.yml -f tag=v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild and upload, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+  version:
+    name: Tag matches the version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Compare the tag with Cargo.toml and the metainfo
+        run: |
+          want="${TAG#v}"
+          have="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "$want" != "$have" ]; then
+            echo "::error::Tag $TAG does not match the version in Cargo.toml ($have). Run 'just bump $want' and commit."
+            exit 1
+          fi
+          if ! grep -q "<release version=\"$want\"" resources/*.metainfo.xml; then
+            echo "::error::The metainfo has no <release> entry for $want. Run 'just bump $want' and commit."
+            exit 1
+          fi
+
+  tarball:
+    name: Tarball
+    needs: [ci, version]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake git curl \
+            libxkbcommon-dev libwayland-dev libfontconfig-dev libfreetype-dev \
+            libinput-dev libudev-dev libseat-dev libgbm-dev libegl1-mesa-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: target/dist/*.tar.gz
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak
+    needs: [ci, version]
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Build the Flatpak
+        run: |
+          id=io.github.Diogo1457.CosmicTodoWidget
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # Build folders live outside the checkout, which the manifest copies as its source.
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo=/tmp/flatpak-repo --state-dir=/tmp/flatpak-state /tmp/flatpak-build \
+            "flatpak/$id.yml"
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            /tmp/flatpak-repo todo-widget.flatpak "$id"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: todo-widget.flatpak
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [tarball, flatpak]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update the release
+        run: |
+          ls -l dist
+          sed "s/@TAG@/$TAG/g" .github/release-notes.md > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists: replacing its files."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --verify-tag \
+              --notes-file notes.md --generate-notes
+          fi

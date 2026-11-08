@@ -255,9 +255,61 @@ _confirm prompt:
         *) echo "Cancelled."; exit 1 ;;
     esac
 
+# ----------------------------------------------------------------------------- development
+
+# format the code
+fmt:
+    cargo fmt --all
+
+# run the tests
+test: rust
+    cd "{{src}}" && cargo test --locked
+
+# everything CI checks: formatting, lints, tests and the install script
+check: rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{src}}"
+    if command -v rustup >/dev/null 2>&1; then rustup component add rustfmt clippy; fi
+    cargo fmt --all --check
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo test --locked
+    bash -n "{{installer}}"
+    if command -v shellcheck >/dev/null 2>&1; then shellcheck "{{installer}}"; else echo "    (shellcheck not installed - skipped)"; fi
+    echo "==> All checks passed"
+
+# set a new version in Cargo.toml, Cargo.lock and the metainfo, e.g. `just bump 0.2.0`
+bump new:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ "{{new}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Error: use a version like 0.2.0" >&2; exit 1; }
+    cd "{{src}}"
+    meta="{{res_dir}}/{{app_id}}.metainfo.xml"
+    grep -q "<release version=\"{{new}}\"" "$meta" && { echo "Error: {{new}} is already in the metainfo" >&2; exit 1; }
+    sed -i '0,/^version = ".*"/s//version = "{{new}}"/' Cargo.toml
+    sed -i "s|<releases>|<releases>\n    <release version=\"{{new}}\" date=\"$(date +%F)\"/>|" "$meta"
+    cargo update --workspace
+    echo "==> Version is now {{new}} (Cargo.toml, Cargo.lock, metainfo). Commit it, then run: just release"
+
+# check everything, then create and push the tag v<version>: GitHub builds and publishes the release
+release: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{src}}"
+    tag="v{{version}}"
+    [ -z "$(git status --porcelain)" ] || { echo "Error: commit your changes first" >&2; exit 1; }
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+        echo "Error: the tag $tag already exists - run 'just bump <new version>' first" >&2
+        exit 1
+    fi
+    git push
+    git tag -a "$tag" -m "$tag"
+    git push origin "$tag"
+    echo "==> Pushed $tag. Follow the build with: gh run watch"
+
 # ----------------------------------------------------------------------------- release
 
-# build target/dist/<name>/ (binary, install.sh, resources/, LICENSE, README) and <name>.tar.gz
+# build the release tarball target/dist/<name>.tar.gz (GitHub runs this for releases; use it to try it locally)
 dist: build
     #!/usr/bin/env bash
     set -euo pipefail

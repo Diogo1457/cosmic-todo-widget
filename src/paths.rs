@@ -5,7 +5,11 @@
 //! already point at the app's private directories, and the runtime directory shared by all
 //! instances of the app is `$XDG_RUNTIME_DIR/app/$FLATPAK_ID`.
 
-use std::{fs, path::{Path, PathBuf}, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 /// Application id (also the name of the panel applet's `.desktop` file).
 pub const APP_ID: &str = "io.github.Diogo1457.CosmicTodoWidget";
@@ -29,12 +33,16 @@ pub fn widget_supported() -> bool {
 
 /// Folder holding `settings.json`.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join(DIR_NAME)
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(DIR_NAME)
 }
 
 /// Folder holding `tasks.json`.
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join(DIR_NAME)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(DIR_NAME)
 }
 
 /// Directory for lock / request files. Must be the same for every process of this app.
@@ -105,4 +113,59 @@ pub fn request_settings() {
 /// Consumes a pending settings request. Returns `true` if there was one.
 pub fn take_settings_request() -> bool {
     fs::remove_file(settings_request_path()).is_ok()
+}
+// ------------------------------------------------------------------ tests
+
+/// A scratch folder for tests, deleted when dropped.
+#[cfg(test)]
+pub(crate) struct TestDir(PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    pub(crate) fn new() -> Self {
+        let name = format!("todo-widget-test-{}", uuid::Uuid::new_v4().simple());
+        let dir = std::env::temp_dir().join(name);
+        fs::create_dir_all(&dir).expect("cannot create test directory");
+        TestDir(dir)
+    }
+
+    pub(crate) fn file(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_creates_missing_folders() {
+        let dir = TestDir::new();
+        let file = dir.file("a/b/data.json");
+        write_atomic(&file, "{}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{}");
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_temp_file() {
+        let dir = TestDir::new();
+        let file = dir.file("data.json");
+        write_atomic(&file, "one");
+        write_atomic(&file, "two");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+        assert!(!file.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn config_and_data_folders_are_named_after_the_app() {
+        assert!(config_dir().ends_with(DIR_NAME));
+        assert!(data_dir().ends_with(DIR_NAME));
+    }
 }

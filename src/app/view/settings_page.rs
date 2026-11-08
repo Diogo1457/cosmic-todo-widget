@@ -21,7 +21,10 @@ fn choice(label: &str, selected: bool, msg: Message) -> Element<'static, Message
 
 /// Gives a row inside a settings section the same padding as the section's own items.
 fn padded(e: Element<'static, Message>) -> Element<'static, Message> {
-    widget::container(e).padding([8, 16]).width(Length::Fill).into()
+    widget::container(e)
+        .padding([8, 16])
+        .width(Length::Fill)
+        .into()
 }
 
 impl App {
@@ -37,8 +40,16 @@ impl App {
             display = display.add(padded(
                 widget::Row::new()
                     .spacing(8)
-                    .push(choice("Show as Widget", widget_mode, Message::SetDisplay(DisplayMode::Widget)))
-                    .push(choice("Show on Panel", !widget_mode, Message::SetDisplay(DisplayMode::Panel)))
+                    .push(choice(
+                        "Show as Widget",
+                        widget_mode,
+                        Message::SetDisplay(DisplayMode::Widget),
+                    ))
+                    .push(choice(
+                        "Show on Panel",
+                        !widget_mode,
+                        Message::SetDisplay(DisplayMode::Panel),
+                    ))
                     .into(),
             ));
         } else {
@@ -64,16 +75,21 @@ impl App {
             .width(Length::Fill)
             .padding([0, 16, 0, 0])
             .push(display)
-            .push(widget::settings::section().title("Header").add(
-                widget::settings::item::builder("Show clock and date").toggler(s.show_clock, Message::SetClock),
-            ));
+            .push(
+                widget::settings::section().title("Header").add(
+                    widget::settings::item::builder("Show clock and date")
+                        .toggler(s.show_clock, Message::SetClock),
+                ),
+            );
 
         if widget_mode {
-            let mut placement = widget::settings::section().title("Monitor").add(padded(choice(
-                "Auto (second monitor if present)",
-                s.monitor == "auto",
-                Message::SetMonitor("auto".into()),
-            )));
+            let mut placement = widget::settings::section()
+                .title("Monitor")
+                .add(padded(choice(
+                    "Auto (second monitor if present)",
+                    s.monitor == "auto",
+                    Message::SetMonitor("auto".into()),
+                )));
             for c in self.monitor_choices() {
                 placement = placement.add(padded(choice(
                     &c.label,
@@ -96,7 +112,8 @@ impl App {
                 let pct = ((a * 100.0).round() as u8).clamp(lo, 100);
                 opacity = opacity.add(
                     widget::settings::item::builder(format!("Widget opacity: {pct} %")).control(
-                        widget::slider(lo..=100, pct, Message::SetOpacity).width(Length::Fixed(200.0)),
+                        widget::slider(lo..=100, pct, Message::SetOpacity)
+                            .width(Length::Fixed(200.0)),
                     ),
                 );
             }
@@ -105,15 +122,19 @@ impl App {
 
         // "Start at login" only starts the desktop widget, so it is pointless in a Flatpak.
         if can_widget {
-            page = page.push(widget::settings::section().title("Startup").add(
-                widget::settings::item::builder("Start at login")
-                    .description("Off by default (the panel applet starts with the panel)")
-                    .toggler(s.autostart, Message::SetAutostart),
-            ));
+            page = page.push(
+                widget::settings::section().title("Startup").add(
+                    widget::settings::item::builder("Start at login")
+                        .description("Off by default (the panel applet starts with the panel)")
+                        .toggler(s.autostart, Message::SetAutostart),
+                ),
+            );
         }
-        let reset = widget::settings::section()
-            .title("Reset")
-            .add(widget::container(self.restore_view()).padding([8, 16]).width(Length::Fill));
+        let reset = widget::settings::section().title("Reset").add(
+            widget::container(self.restore_view())
+                .padding([8, 16])
+                .width(Length::Fill),
+        );
         page = page.push(reset);
 
         let header = widget::Row::new()

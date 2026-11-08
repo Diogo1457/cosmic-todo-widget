@@ -5,6 +5,7 @@
 #
 # Used both by the release tarball (binary + resources/ next to this script) and by
 # `just install` (which points RESOURCES_DIR and BIN_SRC at the source tree).
+# NO_STOP=1 skips stopping running copies; QUIET=1 silences the uninstall message.
 set -euo pipefail
 
 app=cosmic-todo-widget
@@ -34,6 +35,8 @@ legacy_files=(
 )
 
 stop_running() {
+    # NO_STOP=1 leaves running copies alone (used by the automated tests).
+    if [ -n "${NO_STOP:-}" ]; then return 0; fi
     pkill -x "$comm" 2>/dev/null || true
     pkill -x "$applet_comm" 2>/dev/null || true
 }

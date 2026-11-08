@@ -98,7 +98,11 @@ impl App {
             return None;
         }
         if self.settings.monitor != "auto" {
-            if let Some(c) = self.monitor_choices().into_iter().find(|c| c.id == self.settings.monitor) {
+            if let Some(c) = self
+                .monitor_choices()
+                .into_iter()
+                .find(|c| c.id == self.settings.monitor)
+            {
                 return sorted.get(c.index).map(|m| (*m).clone());
             }
         }

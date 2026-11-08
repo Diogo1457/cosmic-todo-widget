@@ -25,7 +25,9 @@ fn host_config_dir() -> PathBuf {
 }
 
 fn path() -> PathBuf {
-    host_config_dir().join("autostart").join("todo-widget.desktop")
+    host_config_dir()
+        .join("autostart")
+        .join("todo-widget.desktop")
 }
 
 pub fn is_enabled() -> bool {
@@ -41,14 +43,30 @@ fn exec_line() -> Option<String> {
     let installed = dirs::executable_dir()
         .map(|d| d.join(env!("CARGO_PKG_NAME")))
         .filter(|p| p.is_file());
-    let exe = installed.or_else(|| std::env::current_exe().ok())?.display().to_string();
-    // Paths with spaces must be quoted in `Exec=`.
-    let exe = if exe.contains(' ') {
+    let exe = installed
+        .or_else(|| std::env::current_exe().ok())?
+        .display()
+        .to_string();
+    Some(format!("{} --background", quote_exec(&exe)))
+}
+
+/// Paths with spaces must be quoted in `Exec=`.
+fn quote_exec(exe: &str) -> String {
+    if exe.contains(' ') {
         format!("\"{}\"", exe.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
-        exe
-    };
-    Some(format!("{exe} --background"))
+        exe.to_string()
+    }
+}
+
+/// The content of the autostart file: the template with the command line filled in (and, in a
+/// Flatpak, the app it belongs to).
+fn render_entry(exec: &str, flatpak_id: Option<&str>) -> String {
+    let mut entry = TEMPLATE.replace("@EXEC@", exec);
+    if let Some(id) = flatpak_id {
+        entry.push_str(&format!("X-Flatpak={id}\n"));
+    }
+    entry
 }
 
 /// Creates or removes the autostart entry.
@@ -66,14 +84,45 @@ pub fn set(enabled: bool) {
         eprintln!("Could not find the executable path; autostart not enabled");
         return;
     };
-    let mut entry = TEMPLATE.replace("@EXEC@", &exec);
-    if let Some(id) = paths::flatpak_id() {
-        entry.push_str(&format!("X-Flatpak={id}\n"));
-    }
+    let entry = render_entry(&exec, paths::flatpak_id().as_deref());
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
     if let Err(err) = fs::write(&path, entry) {
         eprintln!("Could not save {}: {err}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_template_has_exactly_one_placeholder() {
+        assert_eq!(TEMPLATE.matches("@EXEC@").count(), 1);
+        assert!(TEMPLATE.starts_with("[Desktop Entry]"));
+    }
+
+    #[test]
+    fn the_command_line_is_filled_in() {
+        let entry = render_entry("/home/me/.local/bin/cosmic-todo-widget --background", None);
+        assert!(!entry.contains('@'));
+        assert!(entry.contains("\nExec=/home/me/.local/bin/cosmic-todo-widget --background\n"));
+        assert!(entry.contains("X-GNOME-Autostart-enabled=true"));
+        assert!(!entry.contains("X-Flatpak"));
+        assert!(entry.ends_with('\n'));
+    }
+
+    #[test]
+    fn inside_a_flatpak_the_entry_names_the_app() {
+        let entry = render_entry("flatpak run my.App --background", Some("my.App"));
+        assert!(entry.ends_with("X-Flatpak=my.App\n"));
+    }
+
+    #[test]
+    fn paths_with_spaces_are_quoted() {
+        assert_eq!(quote_exec("/usr/bin/app"), "/usr/bin/app");
+        assert_eq!(quote_exec("/my apps/app"), "\"/my apps/app\"");
+        assert_eq!(quote_exec("/my \"apps\"/app"), "\"/my \\\"apps\\\"/app\"");
     }
 }

@@ -1,6 +1,6 @@
 //! The to-do list itself: entry field, folder and task rows, context menu, tool buttons.
 
-use cosmic::iced::{Alignment, Color, Length, mouse};
+use cosmic::iced::{mouse, Alignment, Color, Length};
 use cosmic::widget;
 use cosmic::Element;
 
@@ -22,7 +22,11 @@ impl App {
     /// Progress bar and the "x of y done" counter.
     pub(in crate::app) fn progress_block(&self) -> Element<'_, Message> {
         let (done, total) = self.store.progress();
-        let fraction = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+        let fraction = if total > 0 {
+            done as f32 / total as f32
+        } else {
+            0.0
+        };
         let counter = widget::text::caption(if total > 0 {
             format!("{done} of {total} done")
         } else {
@@ -43,17 +47,21 @@ impl App {
             Some(name) => format!("Add a task to “{name}”…"),
             None => "Add a task…".to_string(),
         };
-        let mut row = widget::Row::new().spacing(10).align_y(Alignment::Center).push(
-            widget::text_input(placeholder, &self.entry)
-                .id(ENTRY_ID.clone())
-                .on_input(Message::Input)
-                .on_submit(|_| Message::Add)
-                .width(Length::Fill),
-        );
+        let mut row = widget::Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(
+                widget::text_input(placeholder, &self.entry)
+                    .id(ENTRY_ID.clone())
+                    .on_input(Message::Input)
+                    .on_submit(|_| Message::Add)
+                    .width(Length::Fill),
+            );
         if target.is_some() {
             row = row.push(widget::button::text("✕").on_press(Message::ClearTarget));
         }
-        row.push(widget::button::suggested("Add").on_press(Message::Add)).into()
+        row.push(widget::button::suggested("Add").on_press(Message::Add))
+            .into()
     }
 
     /// "Clear done", "New folder" and "Settings".
@@ -62,7 +70,10 @@ impl App {
         widget::Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
-            .push(widget::button::text("Clear done").on_press_maybe(any_done.then_some(Message::ClearDone)))
+            .push(
+                widget::button::text("Clear done")
+                    .on_press_maybe(any_done.then_some(Message::ClearDone)),
+            )
             .push(widget::button::text("New folder").on_press(Message::AddFolder))
             .push(widget::button::text("Settings").on_press(Message::OpenSettings))
             .into()
@@ -96,7 +107,10 @@ impl App {
         selected: bool,
         on_press: Option<Message>,
     ) -> Element<'a, Message> {
-        let over = self.item_drag.as_ref().is_some_and(|d| d.over.as_ref() == Some(&target));
+        let over = self
+            .item_drag
+            .as_ref()
+            .is_some_and(|d| d.over.as_ref() == Some(&target));
         let ctx = match &target {
             DropTarget::Task(id) => Some(ContextTarget::Task(id.clone())),
             DropTarget::Folder(id) => Some(ContextTarget::Folder(id.clone())),
@@ -127,7 +141,10 @@ impl App {
             .align_y(Alignment::Center)
             .push(widget::button::text("+ New task").on_press(Message::CtxNewTask))
             .push(widget::button::text("+ New folder").on_press(Message::CtxNewFolder));
-        widget::container(row).padding([4, 10]).class(row_style(true)).into()
+        widget::container(row)
+            .padding([4, 10])
+            .class(row_style(true))
+            .into()
     }
 
     /// A folder header: drag handle, expand arrow, name, counter, rename and delete.
@@ -152,14 +169,20 @@ impl App {
                     ))
                     .width(Length::Fill),
                 )
-                .push(widget::button::destructive("Delete").on_press(Message::ConfirmDeleteFolder(id.clone())))
+                .push(
+                    widget::button::destructive("Delete")
+                        .on_press(Message::ConfirmDeleteFolder(id.clone())),
+                )
                 .push(widget::button::standard("Cancel").on_press(Message::CancelDeleteFolder));
             return self.drop_zone(row.into(), drop_target, false, None);
         }
 
         let editing = matches!(&self.editing, Some((ItemRef::Folder(e), _)) if *e == f.id);
         let selected = self.target_folder().as_deref() == Some(f.id.as_str());
-        let mut row = widget::Row::new().spacing(6).align_y(Alignment::Center).padding([7, 6]);
+        let mut row = widget::Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .padding([7, 6]);
         row = row.push(drag_handle(ItemRef::Folder(id.clone())));
         row = row.push(
             widget::button::text(if f.collapsed { "▸" } else { "▾" })
@@ -172,16 +195,25 @@ impl App {
                 .push(widget::button::text("✕").on_press(Message::EditCancel));
         } else {
             // Click selects the folder (new tasks go inside it); double-click renames it.
-            let label = widget::mouse_area(widget::text::heading(f.name.clone()).width(Length::Fill))
-                .on_press(Message::SelectFolder(id.clone()))
-                .on_double_click(Message::EditStart(ItemRef::Folder(id.clone())));
+            let label =
+                widget::mouse_area(widget::text::heading(f.name.clone()).width(Length::Fill))
+                    .on_press(Message::SelectFolder(id.clone()))
+                    .on_double_click(Message::EditStart(ItemRef::Folder(id.clone())));
             row = row
                 .push(label)
                 .push(widget::text::caption(format!("{done}/{total}")))
-                .push(widget::button::text("✎").on_press(Message::EditStart(ItemRef::Folder(id.clone()))))
+                .push(
+                    widget::button::text("✎")
+                        .on_press(Message::EditStart(ItemRef::Folder(id.clone()))),
+                )
                 .push(widget::button::text("✕").on_press(Message::DeleteFolder(id.clone())));
         }
-        self.drop_zone(row.into(), drop_target, selected, Some(Message::SelectFolder(id)))
+        self.drop_zone(
+            row.into(),
+            drop_target,
+            selected,
+            Some(Message::SelectFolder(id)),
+        )
     }
 
     /// A task row: drag handle, checkbox, text (double-click renames), rename and delete.
@@ -191,10 +223,14 @@ impl App {
         let editing = matches!(&self.editing, Some((ItemRef::Task(e), _)) if *e == t.id);
 
         let mut row = widget::Row::new().spacing(6).align_y(Alignment::Center);
-        row = if indented { row.padding([7, 6, 7, 28]) } else { row.padding([7, 6, 7, 6]) };
-        row = row
-            .push(drag_handle(ItemRef::Task(id.clone())))
-            .push(widget::checkbox(t.done).on_toggle(move |v| Message::Toggle(toggle_id.clone(), v)));
+        row = if indented {
+            row.padding([7, 6, 7, 28])
+        } else {
+            row.padding([7, 6, 7, 6])
+        };
+        row = row.push(drag_handle(ItemRef::Task(id.clone()))).push(
+            widget::checkbox(t.done).on_toggle(move |v| Message::Toggle(toggle_id.clone(), v)),
+        );
 
         if editing {
             row = row
@@ -207,7 +243,10 @@ impl App {
                 widget::text::body(t.text.clone()).class(cosmic::theme::Text::Custom(|theme| {
                     let mut c: Color = theme.cosmic().on_bg_color().into();
                     c.a = 0.45;
-                    cosmic::iced::widget::text::Style { color: Some(c), ..Default::default() }
+                    cosmic::iced::widget::text::Style {
+                        color: Some(c),
+                        ..Default::default()
+                    }
                 }))
             } else {
                 widget::text::body(t.text.clone())
@@ -216,7 +255,10 @@ impl App {
                 .on_double_click(Message::EditStart(ItemRef::Task(id.clone())));
             row = row
                 .push(label)
-                .push(widget::button::text("✎").on_press(Message::EditStart(ItemRef::Task(id.clone()))))
+                .push(
+                    widget::button::text("✎")
+                        .on_press(Message::EditStart(ItemRef::Task(id.clone()))),
+                )
                 .push(widget::button::text("✕").on_press(Message::Delete(id.clone())));
         }
         self.drop_zone(row.into(), DropTarget::Task(t.id.clone()), false, None)
@@ -226,7 +268,10 @@ impl App {
     /// height.
     pub(in crate::app) fn task_list(&self, height: f32) -> Element<'_, Message> {
         // Right padding keeps the text clear of the scrollbar.
-        let mut list = widget::Column::new().spacing(4).width(Length::Fill).padding([0, 14, 0, 0]);
+        let mut list = widget::Column::new()
+            .spacing(4)
+            .width(Length::Fill)
+            .padding([0, 14, 0, 0]);
         if self.store.tasks.is_empty() && self.store.folders.is_empty() {
             list = list.push(
                 widget::container(widget::text::body("Nothing to do - enjoy the day"))
@@ -245,8 +290,10 @@ impl App {
                 let inside = self.ordered(Some(f.id.as_str()));
                 if inside.is_empty() {
                     list = list.push(
-                        widget::container(widget::text::caption("Empty - select the folder and add a task"))
-                            .padding([2, 0, 6, 40]),
+                        widget::container(widget::text::caption(
+                            "Empty - select the folder and add a task",
+                        ))
+                        .padding([2, 0, 6, 40]),
                     );
                 }
                 for t in inside {
@@ -267,11 +314,13 @@ impl App {
             list = list.push(self.context_menu());
         }
         if self.item_drag.is_some() {
-            let zone = widget::container(widget::text::caption("Drop here: outside folders, at the end"))
-                .width(Length::Fill)
-                .height(Length::Fixed(ROW_H))
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center);
+            let zone = widget::container(widget::text::caption(
+                "Drop here: outside folders, at the end",
+            ))
+            .width(Length::Fill)
+            .height(Length::Fixed(ROW_H))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
             list = list.push(self.drop_zone(zone.into(), DropTarget::RootEnd, false, None));
         }
         // Right-click on empty space (rows handle their own right-click).

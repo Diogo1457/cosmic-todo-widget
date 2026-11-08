@@ -40,7 +40,7 @@ impl App {
 
     /// Widest the card may be at its current x so it stays on the monitor.
     pub(super) fn max_w_at_x(&self) -> f32 {
-        (self.mon_w - self.pos.x - SAFETY).min(MAX_WIDTH).max(MIN_WIDTH)
+        (self.mon_w - self.pos.x - SAFETY).clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
     /// Tallest the whole card may be at its current y.
@@ -70,10 +70,12 @@ impl App {
         let chars_per_line = (text_w / 8.0).floor().max(8.0) as usize;
         let mut h = ROW_H * self.store.folders.len() as f32;
         for t in &self.store.tasks {
-            let hidden = t
-                .folder
-                .as_ref()
-                .is_some_and(|fid| self.store.folders.iter().any(|f| f.collapsed && f.id == *fid));
+            let hidden = t.folder.as_ref().is_some_and(|fid| {
+                self.store
+                    .folders
+                    .iter()
+                    .any(|f| f.collapsed && f.id == *fid)
+            });
             if hidden {
                 continue;
             }
@@ -105,7 +107,7 @@ impl App {
     }
 
     fn fit_to_monitor(&mut self) {
-        let max_w = (self.mon_w - 2.0 * SAFETY).min(MAX_WIDTH).max(MIN_WIDTH);
+        let max_w = (self.mon_w - 2.0 * SAFETY).clamp(MIN_WIDTH, MAX_WIDTH);
         self.cur_w = self.cur_w.clamp(MIN_WIDTH, max_w);
         if let Some(h) = self.manual_list_h {
             self.manual_list_h = Some(h.clamp(ROW_H, self.full_cap()));
@@ -154,6 +156,8 @@ impl App {
 
     /// True while the resize handle is being dragged.
     pub(super) fn resizing(&self) -> bool {
-        self.drag.as_ref().is_some_and(|d| d.kind == DragKind::Resize)
+        self.drag
+            .as_ref()
+            .is_some_and(|d| d.kind == DragKind::Resize)
     }
 }

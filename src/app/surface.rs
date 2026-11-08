@@ -7,10 +7,10 @@ use cosmic::iced::platform_specific::runtime::wayland::layer_surface::{
     IcedMargin, IcedOutput, SctkLayerSurfaceSettings,
 };
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
-    Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface, set_margin,
-    set_size,
+    destroy_layer_surface, get_layer_surface, set_margin, set_size, Anchor, KeyboardInteractivity,
+    Layer,
 };
-use cosmic::iced::{Limits, Size, window};
+use cosmic::iced::{window, Limits, Size};
 
 use super::message::Message;
 use super::App;
@@ -39,7 +39,11 @@ impl App {
 
         get_layer_surface::<cosmic::Action<Message>>(SctkLayerSurfaceSettings {
             id,
-            layer: if self.settings.above_windows { Layer::Top } else { Layer::Bottom },
+            layer: if self.settings.above_windows {
+                Layer::Top
+            } else {
+                Layer::Bottom
+            },
             keyboard_interactivity: KeyboardInteractivity::OnDemand,
             input_zone: None,
             anchor: Anchor::TOP | Anchor::LEFT,
@@ -61,7 +65,10 @@ impl App {
         let old = self.surface_id.take();
         let create = self.create_surface(false);
         match old {
-            Some(old) => Task::batch([destroy_layer_surface::<cosmic::Action<Message>>(old), create]),
+            Some(old) => Task::batch([
+                destroy_layer_surface::<cosmic::Action<Message>>(old),
+                create,
+            ]),
             None => create,
         }
     }
